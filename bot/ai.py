@@ -14,6 +14,7 @@ import requests
 from bot.config import gemini_key, gemini_model
 
 log = logging.getLogger(__name__)
+LAST_ERROR = ""   # human-readable reason for the last failure (shown by the self-test)
 URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 PROMPT = (
@@ -33,13 +34,25 @@ def summarize(facts: dict) -> str | None:
         "contents": [{"role": "user", "parts": [{"text": PROMPT + json.dumps(facts, default=str)}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300},
     }
+    global LAST_ERROR
+    LAST_ERROR = ""
     try:
         r = requests.post(URL.format(model=model), json=body, timeout=60,
                           headers={"x-goog-api-key": key, "Content-Type": "application/json"})
         data = r.json()
+    except (requests.RequestException, ValueError) as exc:
+        LAST_ERROR = f"network error ({exc.__class__.__name__})"
+        log.warning("Gemini summary skipped: %s", LAST_ERROR)
+        return None
+    if r.status_code != 200 or "error" in data:
+        err = data.get("error", {}) if isinstance(data, dict) else {}
+        LAST_ERROR = f"HTTP {r.status_code}: {str(err.get('message', 'unknown error'))[:200]}"
+        log.warning("Gemini summary skipped: %s", LAST_ERROR)
+        return None
+    try:
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts).strip()
-    except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
-        log.warning("Gemini summary skipped: %s", exc.__class__.__name__)
+    except (KeyError, IndexError, TypeError):
+        LAST_ERROR = "reply had no text (blocked or empty)"
         return None
     return text[:900] or None

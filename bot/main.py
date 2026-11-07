@@ -6,6 +6,8 @@
     python -m bot.main alerts stocks      # scan NSE watchlist + indices, push fresh signals
     python -m bot.main alerts fno         # push F&O snapshots (NIFTY, BANKNIFTY by default)
     python -m bot.main selftest           # check secrets + data sources, message you
+    python -m bot.main webhook set URL    # Cloud Run: Telegram pushes messages to URL (instant replies)
+    python -m bot.main webhook delete     # back to GitHub's 5-minute checks
 """
 from __future__ import annotations
 
@@ -33,7 +35,8 @@ WELCOME = (
     "2️⃣ Tap a coin number (or send it, e.g. <code>2</code>)\n"
     "3️⃣ Get: BUY/SELL, entry, take profit, stop-loss → strategy lights → full explanation\n\n"
     "You can also send a symbol directly: <code>ETH</code>, <code>RELIANCE</code>, <code>NIFTY</code>.\n"
-    "⏱ Replies arrive within a few minutes (GitHub checks for messages every 5 minutes).\n"
+    "⏱ Replies arrive in seconds when the bot runs on Google Cloud Run, or within a few minutes "
+    "when GitHub checks for messages.\n"
     "<i>For learning and paper trading — not financial advice.</i>"
 )
 
@@ -53,7 +56,7 @@ HELP = (
     "③ Full explanation: every condition, history, structure, order book, AI summary\n\n"
     "<b>Automatic alerts</b>\n"
     "Crypto after every 4h candle · stocks 16:10 IST weekdays · F&amp;O 09:45 &amp; 14:30 IST weekdays\n\n"
-    "⏱ Replies take a few minutes. Faster: GitHub app → Actions → Bot commands → Run workflow."
+    "⏱ With Google Cloud Run, replies come in seconds. Without it, GitHub checks every 5 minutes."
 )
 
 
@@ -238,32 +241,60 @@ def safe_handle(text: str) -> None:
     _safely(text, handle, text)
 
 
+def process_update(u: dict) -> None:
+    """Handle one Telegram update (a message or a button tap). Used by GitHub runs and Cloud Run."""
+    allowed = telegram_chat_id()
+    if "callback_query" in u:
+        cb = u["callback_query"]
+        who = str((cb.get("from") or {}).get("id"))
+        where = str(((cb.get("message") or {}).get("chat") or {}).get("id"))
+        telegram.answer_callback(cb["id"], "Working on it…")
+        if who != allowed or where != allowed:
+            log.warning("Ignored a button tap from another chat.")
+            return
+        log.info("Button: %s", cb.get("data", "")[:60])
+        telegram.chat_action(allowed)
+        _safely(cb.get("data", ""), handle_callback, cb.get("data", ""), allowed)
+        return
+    msg = u.get("message") or {}
+    if str((msg.get("chat") or {}).get("id")) != allowed or not msg.get("text"):
+        log.warning("Ignored a message from another chat.")
+        return
+    log.info("Command: %s", msg["text"][:60])
+    telegram.chat_action(allowed)
+    _safely(msg["text"], handle, msg["text"], allowed)
+
+
 def run_commands() -> None:
     telegram.set_commands()
-    updates = telegram.pending_updates()
+    try:
+        updates = telegram.pending_updates()
+    except telegram.TelegramError as exc:
+        if "webhook" in str(exc).lower():
+            log.info("A webhook is active (Cloud Run answers messages); nothing to do here.")
+            return
+        raise
     if not updates:
         log.info("No new messages.")
         return
     telegram.confirm_updates(updates[-1]["update_id"])  # confirm first: no repeat loops
-    allowed = telegram_chat_id()
     for u in updates:
-        if "callback_query" in u:
-            cb = u["callback_query"]
-            who = str((cb.get("from") or {}).get("id"))
-            where = str(((cb.get("message") or {}).get("chat") or {}).get("id"))
-            telegram.answer_callback(cb["id"], "Working on it…")
-            if who != allowed or where != allowed:
-                log.warning("Ignored a button tap from another chat.")
-                continue
-            log.info("Button: %s", cb.get("data", "")[:60])
-            _safely(cb.get("data", ""), handle_callback, cb.get("data", ""), allowed)
-            continue
-        msg = u.get("message") or {}
-        if str((msg.get("chat") or {}).get("id")) != allowed or not msg.get("text"):
-            log.warning("Ignored a message from another chat.")
-            continue
-        log.info("Command: %s", msg["text"][:60])
-        _safely(msg["text"], handle, msg["text"], allowed)
+        process_update(u)
+
+
+def webhook(action: str, url: str = "") -> None:
+    """Connect Telegram to a Cloud Run URL (instant replies) or disconnect it (back to GitHub checks)."""
+    if action == "set":
+        if not url.startswith("https://"):
+            sys.exit("Give the full https:// URL of your Cloud Run service")
+        telegram.set_webhook(url.rstrip("/") + "/telegram")
+        telegram.set_commands()
+        print("Webhook set: Telegram now sends messages to", url)
+    elif action == "delete":
+        telegram.delete_webhook()
+        print("Webhook removed: GitHub's 'Bot commands' workflow can answer messages again")
+    else:
+        print(telegram.webhook_info())
 
 
 def run_alerts(market: str) -> None:
@@ -327,7 +358,8 @@ def selftest() -> None:
         lines.append("ℹ️ Angel One not configured: NSE data is delayed (Yahoo) and F&O is off")
     if gemini_key() and gemini_model():
         ok = ai.summarize({"test": "Reply with one short sentence saying the connection works."})
-        lines.append("✅ Gemini OK" if ok else "❌ Gemini call failed (check GEMINI_MODEL name and key)")
+        lines.append(f"✅ Gemini OK ({gemini_model()})" if ok else
+                     f"❌ Gemini failed for model '{gemini_model()}': {ai.LAST_ERROR or 'unknown'}")
     else:
         lines.append("ℹ️ Gemini not configured (optional)")
     print("\n".join(problems + lines))
@@ -352,6 +384,8 @@ def main(argv: list[str]) -> None:
             run_alerts(argv[2] if len(argv) > 2 else "crypto")
         elif mode == "selftest":
             selftest()
+        elif mode == "webhook":
+            webhook(argv[2] if len(argv) > 2 else "info", argv[3] if len(argv) > 3 else "")
         else:
             print(__doc__)
             sys.exit(2)

@@ -4,7 +4,7 @@ Telegram bot that runs on GitHub Actions (no server). Crypto (Binance public dat
 (yfinance, daily). Seven strategies, each with BUY and mirrored SELL versions, in `bot/strategies.py`, each a list of 3 conditions with
 step-by-step explanations. Backtests in R multiples in `bot/backtest.py`. Charts in `bot/chart.py`
 (mplfinance). Optional Gemini summary in `bot/ai.py`. Angel One read-only client (live NSE, futures, option chain, Greeks) in `bot/angel.py`; F&O report and OI chart in `bot/fno.py`. Commands, buttons and alerts in `bot/main.py`; the numbered list is remembered in `bot/state.py` (cached between runs by the workflow).
-Workflows in `.github/workflows/`. Settings in `config.json`; secrets only via GitHub Actions secrets.
+Workflows in `.github/workflows/`. Optional Cloud Run webhook server in `bot/server.py` (Dockerfile, `deploy_cloudrun.sh`); with a webhook set, GitHub's commands workflow skips itself. Settings in `config.json`; secrets only via GitHub Actions secrets.
 
 Rules:
 1. Never add order placement or exchange/broker trading keys.

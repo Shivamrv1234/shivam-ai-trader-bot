@@ -1,6 +1,7 @@
 """Minimal Telegram Bot API client: messages, photos, tap buttons, command menu, reading updates."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -112,3 +113,29 @@ def pending_updates() -> list[dict]:
 def confirm_updates(last_update_id: int) -> None:
     """Tell Telegram these updates are handled so they are not returned again."""
     _call("getUpdates", {"offset": last_update_id + 1, "timeout": 0})
+
+
+def chat_action(chat_id: str | None = None, action: str = "typing") -> None:
+    """Shows "typing…" in Telegram while the bot works."""
+    try:
+        _call("sendChatAction", {"chat_id": chat_id or telegram_chat_id(), "action": action})
+    except TelegramError:
+        pass
+
+
+def webhook_secret() -> str:
+    """Secret Telegram adds to every webhook call, derived from the bot token (nothing extra to store)."""
+    return hashlib.sha256(telegram_token().encode()).hexdigest()[:32]
+
+
+def set_webhook(url: str) -> None:
+    _call("setWebhook", {"url": url, "secret_token": webhook_secret(),
+                         "allowed_updates": '["message","callback_query"]', "max_connections": "4"})
+
+
+def delete_webhook() -> None:
+    _call("deleteWebhook", {"drop_pending_updates": "false"})
+
+
+def webhook_info() -> dict:
+    return _call("getWebhookInfo")

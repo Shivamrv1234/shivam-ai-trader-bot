@@ -116,6 +116,33 @@ coins always included, and the NSE stock watchlist.
 
 ---
 
+## Instant replies with Google Cloud Run (recommended)
+
+GitHub only checks Telegram every 5 minutes (often later). With Cloud Run, Telegram sends each message
+straight to your own small server, so replies arrive in seconds. Alerts keep running on GitHub.
+
+1. Create a Google Cloud account at **console.cloud.google.com** (a card is needed for verification;
+   new accounts get free trial credit). Create a project.
+2. In the console, click the **Cloud Shell** icon (top right, `>_`).
+3. In Cloud Shell, run:
+   ```bash
+   git clone https://github.com/<your-github-username>/shivam-ai-trader-bot.git
+   cd shivam-ai-trader-bot
+   bash deploy_cloudrun.sh
+   ```
+4. Type your values when asked (hidden for secrets). The script deploys the bot and connects Telegram.
+5. On GitHub: **Actions → Bot commands → ⋯ → Disable workflow** (Cloud Run answers messages now).
+6. Send `/start` to your bot.
+
+**Update after code changes:** upload the new files to GitHub, then in Cloud Shell run
+`cd shivam-ai-trader-bot && git pull && bash deploy_cloudrun.sh` and press Enter to keep each value.
+**Stop instant replies:** `bash deploy_cloudrun.sh disconnect`, then re-enable the Bot commands workflow.
+
+**Cost:** normal personal use fits Cloud Run's free tier (2 million requests and 180,000 vCPU-seconds a
+month). Container image storage beyond 0.5 GB and data transfer can cost a few rupees a month. When the
+free trial ends you must upgrade the billing account to keep the service running; the free tier still
+applies after that. Set a budget alert in **Billing → Budgets & alerts**.
+
 ## Good to know
 
 - **Costs:** public repositories get free GitHub Actions minutes. Your code is visible to others, but
