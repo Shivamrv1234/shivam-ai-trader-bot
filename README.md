@@ -3,7 +3,7 @@
 No PC and no server to manage. GitHub runs the analysis on a schedule, and Telegram is where you see
 alerts and ask questions.
 
-# Setup Guide- [ View Setup Guide PDF ]https://drive.google.com/file/d/1kKTuWmxFusa_xTigLlfygH-ax-vRlQN2/view?usp=sharing
+# [ View Setup Guide PDF ](https://drive.google.com/file/d/1kKTuWmxFusa_xTigLlfygH-ax-vRlQN2/view?usp=sharing)
 
 **How it works in Telegram**
 1. Send `/start` for the menu, or `/crypto` (or `/stocks`).
