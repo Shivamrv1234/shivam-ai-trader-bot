@@ -10,3 +10,5 @@ smartapi-python>=1.5
 pyotp>=2.9
 logzero>=1.7
 websocket-client>=1.7
+flask>=3.0      # Cloud Run web server (bot/server.py)
+gunicorn>=22.0  # runs the web server on Cloud Run

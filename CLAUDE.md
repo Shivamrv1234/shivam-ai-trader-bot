@@ -3,7 +3,7 @@
 Telegram bot that runs on GitHub Actions (no server). Crypto (Binance public data, 4h) and NSE stocks
 (yfinance, daily). Seven strategies, each with BUY and mirrored SELL versions, in `bot/strategies.py`, each a list of 3 conditions with
 step-by-step explanations. Backtests in R multiples in `bot/backtest.py`. Charts in `bot/chart.py`
-(mplfinance). Optional Gemini summary in `bot/ai.py`. Angel One read-only client (live NSE, futures, option chain, Greeks) in `bot/angel.py`; F&O report and OI chart in `bot/fno.py`. Commands, buttons and alerts in `bot/main.py`; the numbered list is remembered in `bot/state.py` (cached between runs by the workflow).
+(mplfinance). Optional Gemini summary in `bot/ai.py`. Angel One read-only client (live NSE, futures, option chain, Greeks) in `bot/angel.py`; F&O report and OI chart in `bot/fno.py`. Futures report and trade plan in `bot/futures.py`; fundamentals (Yahoo) in `bot/fundamentals.py`; news feeds and the rule-based market links in `bot/news.py`; finding any NSE stock in `bot/symbols.py`. Commands, buttons and alerts in `bot/main.py`; the numbered list is remembered in `bot/state.py` (cached between runs by the workflow).
 Workflows in `.github/workflows/`. Optional Cloud Run webhook server in `bot/server.py` (Dockerfile, `deploy_cloudrun.sh`); with a webhook set, GitHub's commands workflow skips itself. Settings in `config.json`; secrets only via GitHub Actions secrets.
 
 Rules:
@@ -13,3 +13,4 @@ Rules:
 4. Every change to strategies/backtest needs a test in `tests/`; run `python -m pytest -q`.
 5. Keep GitHub Actions usage light (no 24/7 loops).
 6. Do not invent API endpoints or model names; verify in official docs.
+7. News links to sectors/stocks come from keyword rules in `bot/news.py`, never from the LLM.

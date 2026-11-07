@@ -3,6 +3,7 @@
 # Run inside Google Cloud Shell, from the repository folder:
 #     bash deploy_cloudrun.sh            # first deploy, or redeploy after code changes
 #     bash deploy_cloudrun.sh disconnect # stop instant replies (GitHub checks take over again)
+#     bash deploy_cloudrun.sh cleanup    # only delete old container images (stay inside the free 0.5 GB)
 set -euo pipefail
 
 SERVICE="shivam-trader-bot"
@@ -25,6 +26,75 @@ ask_plain() {
   read -rp "$name (Enter to keep current): " value
   printf '%s' "$value"
 }
+
+# Container images: every deploy stores a new image (~150-250 MB) in Artifact Registry, whose free
+# storage is 0.5 GB. Keep the 2 newest (and the one the service runs); delete the rest now, and set a
+# cleanup policy so Google also deletes anything older than 1 day automatically (it runs about daily).
+REPO="cloud-run-source-deploy"
+cleanup_images() {
+  local image="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}" live="" policy
+  policy="$(mktemp)"
+  cat > "$policy" <<'JSON'
+[
+  {"name": "delete-older-than-1-day", "action": {"type": "Delete"},
+   "condition": {"tagState": "any", "olderThan": "86400s"}},
+  {"name": "keep-2-newest", "action": {"type": "Keep"},
+   "mostRecentVersions": {"keepCount": 2}}
+]
+JSON
+  echo "Setting the automatic image cleanup policy (keep 2 newest, delete older than 1 day)..."
+  gcloud artifacts repositories set-cleanup-policies "$REPO" --project="$PROJECT" --location="$REGION" \
+    --policy="$policy" --no-dry-run --quiet >/dev/null \
+    && echo "Cleanup policy set." || echo "Could not set the cleanup policy (images will still be cleaned below)."
+  rm -f "$policy"
+
+  live="$(gcloud run revisions describe "$(gcloud run services describe "$SERVICE" --region "$REGION" \
+          --format 'value(status.latestReadyRevisionName)' 2>/dev/null)" --region "$REGION" \
+          --format 'value(status.imageDigest)' 2>/dev/null || true)"
+  gcloud artifacts docker images list "$image" --format=json 2>/dev/null > /tmp/bot-images.json || echo "[]" > /tmp/bot-images.json
+  python3 - "$live" /tmp/bot-images.json > /tmp/bot-old-images.txt <<'PY'
+import json, sys
+live, path = sys.argv[1], sys.argv[2]
+try:
+    imgs = json.load(open(path))
+except ValueError:
+    imgs = []
+imgs.sort(key=lambda i: i.get("updateTime") or i.get("createTime") or "", reverse=True)
+for img in imgs[2:]:                      # keep the 2 newest
+    digest = img.get("version", "")
+    if digest and digest not in live:     # never the image the service is running
+        print(digest)
+PY
+  local n=0
+  while read -r digest; do
+    [ -z "$digest" ] && continue
+    gcloud artifacts docker images delete "${image}@${digest}" --delete-tags --quiet >/dev/null 2>&1 && n=$((n+1))
+  done < /tmp/bot-old-images.txt
+  rm -f /tmp/bot-images.json /tmp/bot-old-images.txt
+  echo "Deleted $n old image(s)."
+  local bytes
+  bytes="$(gcloud artifacts repositories describe "$REPO" --location="$REGION" --format='value(sizeBytes)' 2>/dev/null || true)"
+  if [ -n "$bytes" ]; then
+    python3 -c "import sys; b=int(sys.argv[1]); print(f'Image storage now: {b/1e6:.0f} MB of the free 500 MB')" "$bytes" || true
+  fi
+
+  # Source uploads (small) also go to a Cloud Storage bucket: delete them after 1 day as well.
+  local life
+  life="$(mktemp)"
+  echo '{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 1}}]}' > "$life"
+  for b in "run-sources-${PROJECT}-${REGION}" "${PROJECT}_cloudbuild"; do
+    if gcloud storage buckets describe "gs://$b" >/dev/null 2>&1; then
+      gcloud storage buckets update "gs://$b" --lifecycle-file="$life" >/dev/null 2>&1 \
+        && echo "Bucket gs://$b: uploads auto-delete after 1 day."
+    fi
+  done
+  rm -f "$life"
+}
+
+if [ "${1:-}" = "cleanup" ]; then
+  cleanup_images
+  exit 0
+fi
 
 if [ "${1:-}" = "disconnect" ]; then
   TOKEN="$(ask_secret TELEGRAM_BOT_TOKEN)"
@@ -104,6 +174,8 @@ URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'valu
 echo "Service URL: $URL"
 curl -s "$URL/" ; echo
 
+cleanup_images
+
 if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
   echo "Token not re-entered, so the Telegram connection was left as it is."
   exit 0
@@ -114,7 +186,7 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   --data-urlencode "url=${URL}/telegram" \
   --data-urlencode "secret_token=${SECRET}" \
   --data-urlencode 'allowed_updates=["message","callback_query"]' \
-  --data-urlencode "max_connections=4" ; echo
+  --data-urlencode "max_connections=1" ; echo   # one message at a time: the bot's memory stays on one server
 echo
 echo "Done. Send /start to your bot: it should reply within seconds (the first reply after a quiet"
 echo "period can take 10-20 seconds while the server wakes up)."

@@ -12,7 +12,22 @@ alerts and ask questions.
    - ② **Strategy check:** the 7 strategies with 🟢 ready / 🟡 forming / ⚪ none
    - ③ **Full explanation:** every condition ✅/❌ with real numbers, history of each strategy on this
      symbol, market structure and levels, live order book, optional Gemini AI summary
-4. You can also send a symbol directly: `ETH`, `RELIANCE`, `NIFTY`, or `/fno NIFTY` for F&O.
+4. Under the explanation of an NSE stock you get buttons: **📊 Option chain**, **📈 Futures**,
+   **🏢 Fundamentals** and **📰 News** for that stock.
+5. You can also send a symbol directly: `ETH`, `RELIANCE`, `NIFTY`, or a company name such as `tata motors`.
+
+**All commands** (or use the buttons in `/start`)
+
+| Command | What you get |
+| --- | --- |
+| `/crypto`, `/stocks` | Numbered scanner lists |
+| `/stock TATAMOTORS` | Full analysis of **any NSE stock** |
+| `/search tata` | Matching NSE symbols as buttons |
+| `/fundamentals INFY` | Valuation, profitability, debt, growth, last quarters, health check (Yahoo data) |
+| `/fno NIFTY` | Option chain, PCR, max pain, OI chart, Greeks and an option trade idea |
+| `/futures RELIANCE` | All expiries, basis, cost of carry, OI build-up, chart and a futures trade plan |
+| `/buildup` | Today's long/short build-up across F&O stocks |
+| `/news`, `/news india`, `/news world`, `/news crypto`, `/news RELIANCE` | 10 stories per page, each linked to the sectors, stocks or crypto it can move; **Next ▶️** for more; send a story's number for the full story |
 
 **Automatic alerts** use the same three-message format: crypto after every 4h candle, stocks at 16:10 IST
 on weekdays (only **fresh** BUY/SELL signals), and F&O snapshots for NIFTY and BANKNIFTY at 09:45 and
@@ -139,7 +154,11 @@ straight to your own small server, so replies arrive in seconds. Alerts keep run
 **Stop instant replies:** `bash deploy_cloudrun.sh disconnect`, then re-enable the Bot commands workflow.
 
 **Cost:** normal personal use fits Cloud Run's free tier (2 million requests and 180,000 vCPU-seconds a
-month). Container image storage beyond 0.5 GB and data transfer can cost a few rupees a month. When the
+month). Container images are stored in Artifact Registry, which is free up to 0.5 GB. The deploy script
+keeps that small: after every deploy it deletes old images (keeping the 2 newest and the one in use), sets
+a cleanup policy so Google deletes images older than 1 day automatically (it runs about once a day), and
+prints how much storage is used. Run `bash deploy_cloudrun.sh cleanup` any time to clean up without
+deploying. When the
 free trial ends you must upgrade the billing account to keep the service running; the free tier still
 applies after that. Set a budget alert in **Billing → Budgets & alerts**.
 
@@ -161,5 +180,5 @@ applies after that. Set a budget alert in **Billing → Budgets & alerts**.
 - **No trading:** this bot never places orders and needs no exchange or broker API keys.
 
 ## Run the tests
-`python -m pytest -q` runs 35 offline tests with simulated data. They also run automatically on GitHub
+`python -m pytest -q` runs 80 offline tests with simulated data. They also run automatically on GitHub
 after every change, in the Self-test workflow.
