@@ -26,13 +26,30 @@ PROMPT = (
 )
 
 
+NEWS_PROMPT = (
+    "You help a beginner trader in India understand one news story. Use ONLY the headline and summary "
+    "in the JSON. In at most 70 words, in simple English: say which Indian sectors, stocks or crypto it "
+    "could affect and why. Do not invent facts, numbers or price targets, and do not say whether to buy "
+    "or sell. If the story is unclear, say so.\n\nJSON:\n"
+)
+
+
 def summarize(facts: dict) -> str | None:
+    return generate(PROMPT + json.dumps(facts, default=str))
+
+
+def news_take(title: str, summary: str, themes: list[str]) -> str | None:
+    return generate(NEWS_PROMPT + json.dumps({"headline": title, "summary": summary, "themes_detected": themes}),
+                    max_tokens=200)
+
+
+def generate(prompt: str, max_tokens: int = 300) -> str | None:
     key, model = gemini_key(), gemini_model()
     if not (key and model):
         return None
     body = {
-        "contents": [{"role": "user", "parts": [{"text": PROMPT + json.dumps(facts, default=str)}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
     }
     global LAST_ERROR
     LAST_ERROR = ""

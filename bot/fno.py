@@ -27,6 +27,11 @@ def _n(v: float | None, d: int = 2) -> str:
     return f"{v:,.{d}f}"
 
 
+def _rs(v: float) -> str:
+    """Signed rupees: +₹15,000 / -₹7,496."""
+    return f"{'+' if v >= 0 else '-'}₹{abs(v):,.0f}"
+
+
 def _lakh(v: float) -> str:
     if v >= 1e7:
         return f"{v / 1e7:.2f}Cr"
@@ -125,6 +130,49 @@ def summary_text(s: angel.FnoSnapshot) -> str:
         lines.append("• Greeks unavailable right now (Angel One returns them during market hours)")
     lines.append("")
     lines.append(chain_table(s))
+    return "\n".join(lines)
+
+
+def option_idea(s: angel.FnoSnapshot, a) -> str:
+    """Defined-risk option idea from the chart analysis (report.Analysis) of the underlying:
+    BUY setup -> ATM call, SELL setup -> ATM put. Premium moves are estimated with delta only."""
+    from bot import report
+
+    head = f"🎯 <b>OPTION TRADE IDEA</b> (from the daily chart)\n{html.escape(report.verdict(a))}"
+    best = a.best()
+    if best is None or a.direction not in ("BUY", "SELL", "FORMING"):
+        return (head + "\n⚪ No BUY or SELL setup on the chart, so no option idea. Buying options without a "
+                "setup mostly pays time decay.")
+    kind = "CE" if best.side == "BUY" else "PE"
+    leg = next((l for l in s.side(kind) if l.strike == s.atm), None)
+    if leg is None or not leg.ltp:
+        return head + f"\nNo live ATM {kind} price right now."
+    delta = abs(leg.delta) if leg.delta is not None else 0.5
+    move_tp = abs(best.target - best.entry)
+    move_sl = abs(best.entry - best.stop)
+    at_tp = leg.ltp + delta * move_tp
+    at_sl = max(leg.ltp - delta * move_sl, 0.05)
+    cost = leg.ltp * s.lot
+    cap, _ = capital("stock")
+    days = max((s.expiry - datetime.now(IST).date()).days, 0)
+    pre = "If it triggers: " if a.direction == "FORMING" else ""
+    lines = [head, "━━━━━━━━━━━━━━━━━━",
+             f"{pre}{'🟢' if kind == 'CE' else '🔴'} <b>BUY {html.escape(s.name)} {s.atm:,.0f} {kind}</b> "
+             f"(expiry {s.expiry:%d %b}, {days} days)",
+             f"💵 Premium ₹{_n(leg.ltp)} × lot {s.lot} = <b>₹{cost:,.0f}</b> "
+             f"({cost / cap * 100:.0f}% of your ₹{cap:,.0f})",
+             f"💰 If {html.escape(s.name)} reaches take profit {_n(best.target)}: premium ≈ ₹{_n(at_tp)} "
+             f"(≈ {_rs((at_tp - leg.ltp) * s.lot)} per lot)",
+             f"🛑 If it hits the stop {_n(best.stop)}: premium ≈ ₹{_n(at_sl)} → exit "
+             f"(≈ {_rs((at_sl - leg.ltp) * s.lot)} per lot)",
+             f"🧯 Worst case: the whole premium ₹{cost:,.0f} if it expires worthless."]
+    if leg.theta is not None:
+        lines.append(f"⏳ Time decay ≈ ₹{abs(leg.theta) * s.lot:,.0f} per lot per day (theta {leg.theta:.2f}).")
+    lines.append(f"Estimate uses delta {delta:.2f}" + ("" if leg.delta is not None else " (assumed for ATM)")
+                 + "; it ignores time decay and IV changes, so real premiums will differ.")
+    if days <= 2:
+        lines.append("⚠️ Expiry is very close: premiums can collapse within hours.")
+    lines.append("<i>Options can lose 100% of the premium quickly. Paper-trade first; not financial advice.</i>")
     return "\n".join(lines)
 
 

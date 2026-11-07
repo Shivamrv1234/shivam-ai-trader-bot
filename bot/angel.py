@@ -8,7 +8,11 @@ Confirmed from Angel One's SDK source / forum:
 - candles: getCandleData({exchange, symboltoken, interval, fromdate, todate})
 - quotes: getMarketData("FULL", {"NSE": [...], "NFO": [...]}) -> data.fetched[]
 - greeks: optionGreek({"name": ..., "expirydate": ...})
-- instrument list: OpenAPIScripMaster.json (strike in paise, expiry like 26NOV2026)
+- instrument list: OpenAPIScripMaster.json (strike in paise, expiry like 26NOV2026); public, no login
+- OI build-up: oIBuildup({"expirytype": "NEAR", "datatype": "Long Built Up"}) -> rows with
+  tradingSymbol, ltp, percentChange, opnInterest, netChangeOpnInterest (Angel One forum post 15207)
+- historical OI: getOIData({exchange, symboltoken, interval, fromdate, todate}); row format is not
+  documented, so it is parsed defensively and simply skipped if unreadable
 Response field names behind Angel One's login are read with fallbacks (see pick()).
 """
 from __future__ import annotations
@@ -36,6 +40,7 @@ INDEX_ALIASES = {
     "SENSEX": ["SENSEX"],
 }
 YAHOO_INDEX = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
+BUILDUP_TYPES = ["Long Built Up", "Short Built Up", "Short Covering", "Long Unwinding"]
 
 
 class AngelError(RuntimeError):
@@ -90,6 +95,51 @@ def load_instruments(raw: list | None = None) -> pd.DataFrame:
     df["name_u"] = df["name"].astype(str).str.upper()
     df["symbol_u"] = df["symbol"].astype(str).str.upper()
     return df
+
+
+_INST_CACHE: dict = {}
+
+
+def instruments() -> pd.DataFrame:
+    """The public instrument list, downloaded once per process (it is large)."""
+    if "df" not in _INST_CACHE:
+        _INST_CACHE["df"] = load_instruments()
+    return _INST_CACHE["df"]
+
+
+def nse_equities(inst: pd.DataFrame) -> pd.DataFrame:
+    eq = inst[(inst["exch_seg"] == "NSE") & inst["symbol_u"].str.endswith("-EQ")].copy()
+    eq["sym"] = eq["symbol_u"].str[:-3]
+    return eq
+
+
+def search_equities(inst: pd.DataFrame, query: str, limit: int = 8) -> list[str]:
+    """NSE symbols matching a query: exact symbol first, then symbols starting with it, then containing it.
+    The instrument list has symbols only (no company names), so 'tata motors' becomes 'TATAMOTORS'."""
+    q = "".join(ch for ch in query.upper() if ch.isalnum() or ch in "&-")
+    if not q:
+        return []
+    eq = nse_equities(inst)
+    syms = sorted(set(eq["sym"]))
+    exact = [x for x in syms if x == q]
+    starts = sorted([x for x in syms if x.startswith(q) and x != q], key=len)
+    contains = sorted([x for x in syms if q in x and not x.startswith(q)], key=len)
+    return (exact + starts + contains)[:limit]
+
+
+def has_fno(inst: pd.DataFrame, name: str) -> bool:
+    n = name.upper()
+    nfo = inst[(inst["exch_seg"] == "NFO") & (inst["name_u"] == n)]
+    return bool(len(nfo))
+
+
+def all_futures(inst: pd.DataFrame, name: str, today: date | None = None) -> pd.DataFrame:
+    """Every live futures contract of an underlying, nearest expiry first (near / next / far)."""
+    today = today or datetime.now(IST).date()
+    n = name.upper()
+    f = inst[(inst["exch_seg"] == "NFO") & (inst["name_u"] == n) & inst["instrumenttype"].isin(["FUTIDX", "FUTSTK"])]
+    f = f[f["exp"].notna() & (f["exp"] >= today)]
+    return f.sort_values("exp")
 
 
 @dataclass
@@ -155,7 +205,7 @@ class Angel:
     @property
     def inst(self) -> pd.DataFrame:
         if self._inst is None:
-            self._inst = load_instruments()
+            self._inst = instruments()
         return self._inst
 
     def _ok(self, resp, what: str):
@@ -198,6 +248,60 @@ class Angel:
         if rows:
             self.last_keys["greeks"] = sorted(rows[0].keys())
         return rows
+
+    def oi_buildup(self, expirytype: str = "NEAR") -> dict[str, tuple[str, dict]]:
+        """{trading symbol: (build-up type, row)} from Angel One's four OI build-up lists.
+        The lists hold the day's top contracts only, so a symbol may be missing."""
+        out = {}
+        for kind in BUILDUP_TYPES:
+            try:
+                rows = self._ok(self.api.oIBuildup({"expirytype": expirytype, "datatype": kind}), f"OI build-up {kind}")
+            except AngelError as exc:
+                log.warning("%s", exc)
+                continue
+            except Exception as exc:  # older SDK without the method, network errors
+                log.warning("OI build-up unavailable: %s", exc.__class__.__name__)
+                return out
+            for r in rows if isinstance(rows, list) else []:
+                sym = str(pick(r, "tradingSymbol", "symbol", default="")).upper()
+                tok = str(pick(r, "symbolToken", "token", default=""))
+                if sym:
+                    out.setdefault(sym, (kind, r))
+                if tok:
+                    out.setdefault("#" + tok, (kind, r))
+            if rows and isinstance(rows, list):
+                self.last_keys["oi_buildup"] = sorted(rows[0].keys())
+            time.sleep(1.1)  # Angel One rate limit
+        return out
+
+    def oi_history(self, token: str, exchange: str = "NFO", days: int = 90) -> pd.Series | None:
+        """Daily open interest of a contract (oldest first), or None if Angel One returns nothing readable."""
+        to_dt = datetime.now(IST)
+        params = {"exchange": exchange, "symboltoken": token, "interval": "ONE_DAY",
+                  "fromdate": (to_dt - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
+                  "todate": to_dt.strftime("%Y-%m-%d %H:%M")}
+        try:
+            rows = self._ok(self.api.getOIData(params), "OI history")
+        except Exception as exc:
+            log.warning("OI history unavailable: %s", exc)
+            return None
+        pts = []
+        for r in rows if isinstance(rows, list) else []:
+            if isinstance(r, dict):
+                t, v = pick(r, "time", "timestamp", "date"), pick(r, "oi", "openInterest", "opnInterest")
+            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                t, v = r[0], r[-1]
+            else:
+                continue
+            ts = pd.to_datetime(t, errors="coerce", utc=True)
+            if ts is not pd.NaT and v is not None:
+                pts.append((ts, num(v)))
+        if rows and isinstance(rows, list):
+            self.last_keys["oi_history"] = sorted(rows[0].keys()) if isinstance(rows[0], dict) else ["(list rows)"]
+        if len(pts) < 2:
+            return None
+        ser = pd.Series(dict(pts)).sort_index()
+        return ser[~ser.index.duplicated(keep="last")]
 
     def spot_candles(self, name: str) -> pd.DataFrame:
         u = find_underlying(self.inst, name)
@@ -403,3 +507,115 @@ def orderflow(a: Angel, name: str, avg_daily_volume: float | None = None) -> dic
     if len(flow) <= 2:
         return None
     return flow
+
+
+# ---------------------------------------------------------------- futures (all expiries)
+
+@dataclass
+class FutLeg:
+    symbol: str
+    token: str
+    expiry: date
+    lot: int
+    ltp: float = 0.0
+    change_pct: float = 0.0
+    oi: float = 0.0
+    volume: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    prev_close: float = 0.0
+    buildup: str | None = None        # from Angel One's OI build-up lists
+    oi_change_pct: float | None = None
+
+
+@dataclass
+class FuturesReport:
+    name: str
+    kind: str
+    spot: float
+    spot_change_pct: float
+    legs: list = field(default_factory=list)
+    fetched_at: str = ""
+    candles: pd.DataFrame | None = None   # near-month future, daily
+    oi_hist: pd.Series | None = None      # near-month future, daily OI
+
+    @staticmethod
+    def days_left(leg: FutLeg) -> int:
+        return max((leg.expiry - datetime.now(IST).date()).days, 0)
+
+    def basis(self, leg: FutLeg) -> float:
+        return leg.ltp - self.spot
+
+    def basis_pct(self, leg: FutLeg) -> float:
+        return self.basis(leg) / self.spot * 100 if self.spot else 0.0
+
+    def carry_annual_pct(self, leg: FutLeg) -> float | None:
+        d = self.days_left(leg)
+        return self.basis_pct(leg) * 365 / d if d >= 1 else None
+
+
+def classify_buildup(price_change_pct: float, oi_change: float) -> str | None:
+    """Standard reading of price vs open-interest change."""
+    if not oi_change or not price_change_pct:
+        return None
+    if price_change_pct > 0:
+        return "Long Built Up" if oi_change > 0 else "Short Covering"
+    return "Short Built Up" if oi_change > 0 else "Long Unwinding"
+
+
+def build_futures(a: Angel, name: str) -> FuturesReport:
+    u = find_underlying(a.inst, name)
+    futs = all_futures(a.inst, u.name).head(3)
+    if not len(futs):
+        raise AngelError(f"{u.name} has no futures on NSE (only F&O stocks and indices do)")
+    spot_q = a.ltp(u.name)
+    spot = num(pick(spot_q, "ltp", "lastTradedPrice"))
+    if not spot:
+        raise AngelError(f"No live price for {u.name}")
+    fetched = a.quotes({"NFO": [str(t) for t in futs["token"]]})
+    by_tok = {str(pick(q, "symbolToken", "token", default="")): q for q in fetched}
+    by_sym = {str(pick(q, "tradingSymbol", "symbol", default="")).upper(): q for q in fetched}
+    rep = FuturesReport(name=u.name, kind=u.kind, spot=spot,
+                        spot_change_pct=num(pick(spot_q, "percentChange", "pChange")),
+                        fetched_at=datetime.now(IST).strftime("%d %b %H:%M IST"))
+    buildups = a.oi_buildup("NEAR")
+    for _, row in futs.iterrows():
+        sym = str(row["symbol"]).upper()
+        q = by_tok.get(str(row["token"])) or by_sym.get(sym) or {}
+        leg = FutLeg(symbol=str(row["symbol"]), token=str(row["token"]), expiry=row["exp"],
+                     lot=int(row["lot"]) if pd.notna(row["lot"]) else 0,
+                     ltp=num(pick(q, "ltp")), change_pct=num(pick(q, "percentChange")),
+                     oi=num(pick(q, "opnInterest", "openInterest", "oi")),
+                     volume=num(pick(q, "tradeVolume", "volume")), high=num(pick(q, "high")),
+                     low=num(pick(q, "low")), prev_close=num(pick(q, "close")))
+        hit = buildups.get(sym) or buildups.get("#" + str(row["token"]))
+        if hit:
+            leg.buildup = hit[0]
+        rep.legs.append(leg)
+    if not any(l.ltp for l in rep.legs):
+        raise AngelError(f"No live futures prices for {u.name}")
+    near = rep.legs[0]
+    try:
+        rep.candles = a.candles(near.token, "NFO", "ONE_DAY", days=120)
+    except AngelError as exc:
+        log.warning("Futures candles %s: %s", near.symbol, exc)
+    rep.oi_hist = a.oi_history(near.token)
+    if rep.oi_hist is not None and len(rep.oi_hist) >= 2 and rep.oi_hist.iloc[-2]:
+        near.oi_change_pct = (rep.oi_hist.iloc[-1] - rep.oi_hist.iloc[-2]) / rep.oi_hist.iloc[-2] * 100
+        if near.buildup is None:
+            near.buildup = classify_buildup(near.change_pct, near.oi_change_pct)
+    return rep
+
+
+def market_buildup(a: Angel, expirytype: str = "NEAR", top: int = 5) -> dict[str, list[dict]]:
+    """Top contracts in each OI build-up list (market-wide futures positioning today)."""
+    out = {}
+    for kind in BUILDUP_TYPES:
+        try:
+            rows = a._ok(a.api.oIBuildup({"expirytype": expirytype, "datatype": kind}), f"OI build-up {kind}")
+        except AngelError as exc:
+            log.warning("%s", exc)
+            rows = []
+        out[kind] = [r for r in (rows if isinstance(rows, list) else [])][:top]
+        time.sleep(1.1)  # Angel One rate limit
+    return out
