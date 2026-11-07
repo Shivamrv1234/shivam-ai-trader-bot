@@ -1,0 +1,81 @@
+name: Bot commands
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # check Telegram every 5 minutes (GitHub's minimum; runs can start late)
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Command to run now, e.g. /crypto  or  ETH  or  /fno NIFTY"
+        required: true
+        default: /crypto
+
+concurrency:
+  group: commands
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  commands:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Any new Telegram messages or button taps?
+        id: check
+        if: github.event_name == 'schedule'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          n=$(curl -s --max-time 20 "https://api.telegram.org/bot${TOKEN}/getUpdates?timeout=0" \
+              | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("result", [])))' || echo 0)
+          echo "New updates: $n"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
+      - uses: actions/setup-python@v5
+        if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
+        run: pip install -r requirements.txt
+
+      - name: Restore the last numbered list (so typing "2" works)
+        if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Answer messages and button taps
+        if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          EVENT: ${{ github.event_name }}
+          COMMAND: ${{ inputs.command }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            python -m bot.main run "$COMMAND"
+          else
+            python -m bot.main commands
+          fi
+
+      - name: Save the numbered list for the next run
+        if: always() && (github.event_name != 'schedule' || steps.check.outputs.count != '0')
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
