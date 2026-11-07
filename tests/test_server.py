@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("flask")  # the web server is optional; skip these tests if Flask is missing
+
 from bot import main, telegram
 from tests.test_bot import candles
 

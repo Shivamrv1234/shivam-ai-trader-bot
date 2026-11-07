@@ -169,7 +169,8 @@ def test_commands_route_and_deliver(monkeypatch, sent):
     assert kinds == ["photo", "text", "text"]          # trade card, strategy check, explanation
     assert "SOL/USDT" in sent[0][2]
     assert "STRATEGY CHECK" in sent[1][1] and "FULL EXPLANATION" in sent[2][1]
-    assert sent[2][2] and sent[2][2][0][0][1] == "a:c:SOLUSDT"   # Refresh button
+    flat = [b for row in sent[2][2] for b in row]
+    assert ("🔄 Refresh", "a:c:SOLUSDT") in flat and ("📰 Crypto news", "n:c:crypto") in flat
     sent.clear()
     main.handle("/help")
     assert "/crypto" in sent[0][1]
@@ -191,7 +192,7 @@ def test_crypto_ranking(monkeypatch, sent):
     main.handle("/crypto")
     listing, buttons = sent[0][1], sent[0][2]
     assert "CRYPTO SCANNER" in listing and "Skipped (no data): C3USDT" in listing
-    flat = [b for row in buttons for b in row]
+    flat = [b for row in buttons[:-1] for b in row]   # last row: news + menu
     assert len(flat) == 3 and flat[0][0].startswith("1. ")
     # numbers in the text match the buttons and the remembered list
     second = flat[1][1].split(":")[2]

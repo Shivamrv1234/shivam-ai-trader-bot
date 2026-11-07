@@ -160,7 +160,7 @@ def test_fno_command_end_to_end(monkeypatch):
     monkeypatch.setattr(angel, "session", lambda: sess)
     main.handle("/fno nifty")
     assert [k for k, _ in sent] == ["photo", "text"]
-    assert "STRATEGY VIEW" in sent[1][1] and "F&amp;O REPORT" in sent[1][1]
+    assert "OPTION TRADE IDEA" in sent[1][1] and "F&amp;O REPORT" in sent[1][1]
     assert all(len(c) <= 4096 for c in telegram.split_text(sent[1][1]))
 
 
