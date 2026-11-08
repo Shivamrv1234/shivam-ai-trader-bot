@@ -32,4 +32,8 @@ jobs:
           ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
           ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
           ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          ALLOWED_CHATS: ${{ secrets.ALLOWED_CHATS }}
+          ALLOWED_USERS: ${{ secrets.ALLOWED_USERS }}
+          ALERT_CHATS: ${{ secrets.ALERT_CHATS }}
         run: python -m bot.main selftest

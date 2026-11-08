@@ -44,7 +44,7 @@ jobs:
         if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
         run: pip install -r requirements.txt
 
-      - name: Restore the last numbered list (so typing "2" works)
+      - name: Restore lists, paper trades and approved groups (.state)
         if: github.event_name != 'schedule' || steps.check.outputs.count != '0'
         uses: actions/cache/restore@v4
         with:
@@ -63,6 +63,10 @@ jobs:
           ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
           ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
           ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          ALLOWED_CHATS: ${{ secrets.ALLOWED_CHATS }}
+          ALLOWED_USERS: ${{ secrets.ALLOWED_USERS }}
+          ALERT_CHATS: ${{ secrets.ALERT_CHATS }}
           EVENT: ${{ github.event_name }}
           COMMAND: ${{ inputs.command }}
         run: |
@@ -72,7 +76,7 @@ jobs:
             python -m bot.main commands
           fi
 
-      - name: Save the numbered list for the next run
+      - name: Save lists, paper trades and approved groups for the next run
         if: always() && (github.event_name != 'schedule' || steps.check.outputs.count != '0')
         continue-on-error: true
         uses: actions/cache/save@v4
