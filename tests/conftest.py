@@ -18,8 +18,23 @@ def offline(monkeypatch):
     monkeypatch.setattr(symbols, "yahoo_search", lambda q, limit=8: [])
     monkeypatch.setattr(news, "fetch_feed", lambda url, source, cat: [])
     monkeypatch.setattr(news, "article_description", lambda url: "")
-    for k in ("GEMINI_API_KEY", "GEMINI_MODEL"):
+    for k in ("GEMINI_API_KEY", "GEMINI_MODEL", "TWELVE_DATA_API_KEY", "TWELVEDATA_API_KEY", "ALLOWED_CHATS",
+              "ALLOWED_USERS", "ALERT_CHATS", "BOT_STORE"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(data, "crypto_price", lambda sym: None)
+    from bot import fx, main, report, vol
+
+    monkeypatch.setattr(fx, "_MT5", {"ok": False})
+    monkeypatch.setattr(vol, "india_vix", lambda: None)
+    report._CACHE.clear()
+    main._GROUPS.clear()
+    main._FUND.clear()
+
+
+@pytest.fixture(autouse=True)
+def private_store(monkeypatch, tmp_path):
+    """Paper trades and approved groups go to a temporary file in every test."""
+    monkeypatch.setenv("BOT_STORE", str(tmp_path / "store.json"))
 
 
 @pytest.fixture(autouse=True)

@@ -128,26 +128,27 @@ def test_find_stock_without_instrument_list_uses_yahoo(monkeypatch):
 
 
 def test_stock_command_lists_matches_then_analyses(monkeypatch, ui, live_angel):
-    monkeypatch.setattr(data, "stock_candles", lambda sym: candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
     main.handle("/stock tata")
     assert "NSE matches" in ui[0][1]
     assert ("TATASTEEL", "a:s:TATASTEEL") in flat(ui[0][2])
     ui.clear()
     main.handle_callback("a:s:RELIANCE", "555")
-    assert [k for k, *_ in ui] == ["photo", "text", "text"]
-    btns = flat(ui[2][2])
-    for want in [("📊 Option chain", "fno:RELIANCE"), ("📈 Futures", "fu:RELIANCE"),
-                 ("🏢 Fundamentals", "fd:RELIANCE"), ("📰 News", "n:q:RELIANCE"), main.HOME]:
+    assert [k for k, *_ in ui] == ["photo", "text"]
+    btns = flat(ui[1][2])
+    for want in [("⛓ Option chain", "fno:RELIANCE"), ("📈 Futures", "fu:RELIANCE"), ("🧮 Greeks", "gk:RELIANCE"),
+                 ("🧠 F&O plan", "fp:RELIANCE"), ("🏢 Fundamentals", "fd:RELIANCE"), ("📰 News", "n:q:RELIANCE"),
+                 ("🌡 Volatility / VIX", "vx:s:RELIANCE:1d"), main.HOME]:
         assert want in btns
 
 
 def test_menu_button_then_typed_name(monkeypatch, ui, live_angel):
-    monkeypatch.setattr(data, "stock_candles", lambda sym: candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
     main.handle_callback("m:stock", "555")
     assert "ANALYSE ANY NSE STOCK" in ui[0][1] and ("RELIANCE", "a:s:RELIANCE") in flat(ui[0][2])
     ui.clear()
     main.handle("tata motors", "555")
-    assert [k for k, *_ in ui] == ["photo", "text", "text"] and "TATAMOTORS" in ui[0][1]
+    assert [k for k, *_ in ui] == ["photo", "text"] and "TATAMOTORS" in ui[0][1]
     assert state.take_wait("555") is None   # used up
 
 
@@ -206,6 +207,7 @@ def test_stock_without_futures_explains(live_angel):
 class StubAnalysis:
     def __init__(self, side="BUY", direction="BUY"):
         self.direction, self.agree, self.watches, self.forming_side = direction, 3, [], None
+        self.n_applicable = 11
         if side == "BUY":
             self.s = strategies.Setup("k", "EMA Trend Cross", "i", "TRADE", entry=SPOT, stop=SPOT - 200,
                                       target=SPOT + 400)
@@ -289,8 +291,12 @@ def test_fundamentals_scoring_and_units():
     assert f.debt_to_equity == pytest.approx(0.09)              # Yahoo gives 9.0 meaning 9%
     assert f.dividend_yield_pct == pytest.approx(43 / 1540 * 100)  # not Yahoo's ambiguous dividendYield
     text = fundamentals.report_text(f)
-    assert "₹6.40 L Cr" in text and "P/E 23.5" in text and "Debt/Equity 0.09" in text and "Verdict" in text
-    assert "(at 34% of the range)" in text
+    assert "₹6.40 L Cr" in text and "P/E: <b>23.5</b>" in text and "Debt / equity: <b>0.09</b>" in text
+    assert "Verdict" in text and "52-week position: <b>34%" in text
+    assert "🟢 Debt / equity" in text and "🔴 Profit (quarter, YoY)" in text    # green pros, red cons
+    brief = fundamentals.brief_text(f)
+    assert "🟢 ROE: <b>31.0%</b>" in brief and "Strengths" in brief and "Weaknesses" in brief
+    assert "Detailed fundamentals" in brief and len(brief) < len(text)
 
 
 def test_fundamentals_bank_skips_debt_checks():
@@ -316,8 +322,15 @@ def test_fundamentals_fetch_and_button(monkeypatch, ui):
     monkeypatch.setattr(yf, "Ticker", T)
     main.handle_callback("fd:INFY", "555")
     text = ui[0][1]
-    assert "INFY · FUNDAMENTALS" in text and "LAST QUARTERS" in text and "Jun 2026" in text
+    assert "INFY · FUNDAMENTALS" in text and "LAST QUARTERS" not in text
     assert ("📈 Technical analysis", "a:s:INFY") in flat(ui[0][2])
+    assert ("📑 Detailed fundamentals", "fdd:INFY") in flat(ui[0][2])
+    assert ("🔗 Screener", "https://www.screener.in/company/INFY/") in flat(ui[0][2])
+    ui.clear()
+    main.handle_callback("fdd:INFY", "555")
+    text = ui[0][1]
+    assert "DETAILED FUNDAMENTALS" in text and "LAST QUARTERS" in text and "Jun 2026" in text
+    assert ("📑 Detailed fundamentals", "fdd:INFY") not in flat(ui[0][2])
 
 
 def test_fundamentals_missing_data(monkeypatch, ui):
@@ -438,7 +451,7 @@ def test_number_goes_to_the_latest_list(monkeypatch, ui):
     main.handle("/crypto", "555")
     ui.clear()
     main.handle("1", "555")
-    assert [k for k, *_ in ui] == ["photo", "text", "text"]        # scanner pick, not news
+    assert [k for k, *_ in ui] == ["photo", "text"]        # scanner pick, not news
     main.handle("/news", "555")
     ui.clear()
     main.handle("1", "555")
@@ -505,7 +518,7 @@ def test_edit_ignores_not_modified_and_falls_back(monkeypatch):
 def test_every_menu_button_works(monkeypatch, ui, live_angel):
     monkeypatch.setattr(data, "top_crypto_by_volume", lambda n: [{"symbol": "BTCUSDT", "change_pct": 1.0}])
     monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=3000: candles())
-    monkeypatch.setattr(data, "stock_candles", lambda sym: candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
     fake_feeds(monkeypatch, 5)
     for label, cb in flat(main.MENU):
         ui.clear()

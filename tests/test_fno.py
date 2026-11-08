@@ -173,7 +173,7 @@ def test_index_analysis_uses_angel_live_data(monkeypatch):
     text = report.full_text(a)
     assert "Angel One (live)" in report.card(a) and "📦 Size" not in text
     if a.best():
-        assert "/fno NIFTY" in report.card(a)
+        assert "trade it via F&amp;O" in report.card(a)
 
 
 def test_fno_without_angel_explains(monkeypatch):

@@ -61,7 +61,7 @@ def test_button_tap_gives_three_messages(client, monkeypatch):
     tap = {"update_id": 4, "callback_query": {"id": "q", "data": "a:c:BTCUSDT", "from": {"id": 555},
                                               "message": {"chat": {"id": 555}}}}
     assert client.post("/telegram", json=tap, headers=headers()).status_code == 200
-    assert [k for k, _ in client.sent] == ["photo", "text", "text"]
+    assert [k for k, _ in client.sent] == ["photo", "text"]
 
 
 def test_errors_still_return_200(client, monkeypatch):

@@ -1,3 +1,5 @@
+import html
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -39,12 +41,33 @@ def test_rsi_exact_wilder_value():
     assert rsi(pd.Series(vals)).iloc[-1] == pytest.approx(100 - 100 / (1 + 2 * 13 / 14), abs=1e-6)
 
 
+def nse_intraday(days=60, freq="5min", seed=1, drift=0.0, gap=0.006):
+    """Synthetic NSE session candles 09:15-15:25 IST with small overnight gaps."""
+    parts = [pd.date_range(d + pd.Timedelta(hours=3, minutes=45), d + pd.Timedelta(hours=9, minutes=55), freq=freq,
+                           tz="UTC") for d in pd.bdate_range("2026-06-01", periods=days)]
+    idx = parts[0].append(parts[1:])
+    df = candles(len(idx), seed=seed, vol=0.003, start=1400, drift=drift)
+    df.index = idx
+    rng = np.random.default_rng(seed + 7)
+    day = idx.tz_convert("Asia/Kolkata").date
+    for k in range(1, len(idx)):            # overnight gap: shift the whole next day
+        if day[k] != day[k - 1]:
+            g = 1 + rng.uniform(-gap, gap)
+            df.iloc[k:, :4] *= g
+    return df
+
+
 def test_every_strategy_fires_somewhere_and_levels_are_sane():
     up, _ = strategies.prepare(candles(1500, seed=11))
     down, _ = strategies.prepare(candles(1500, seed=11, drift=-0.0006))
-    assert len(strategies.ALL) == 14 and len(strategies.FAMILIES) == 7
+    i_up, _ = strategies.prepare(nse_intraday(seed=4), tf="5m", tz="Asia/Kolkata", venue="nse")
+    i_dn, _ = strategies.prepare(nse_intraday(seed=5, drift=-0.00005), tf="5m", tz="Asia/Kolkata", venue="nse")
+    assert len(strategies.ALL) == 28 and len(strategies.FAMILIES) == 14
     for strat in strategies.ALL:
         x = up if strat.side == "BUY" else down
+        if strat.applies(x):                        # VWAP / ORB / gap fill need intraday NSE candles
+            x = i_up if strat.side == "BUY" else i_dn
+            assert not strat.applies(x), strat.name
         sig = strat.signal(x)
         assert sig.sum() > 0, f"{strat.side} {strat.name} never fired on 1500 random candles"
         for i in np.flatnonzero(sig.to_numpy())[:20]:
@@ -58,6 +81,9 @@ def test_evaluate_status_matches_checks():
     for strat in strategies.ALL:
         s = strategies.evaluate(strat, x)
         passed = sum(ok for ok, _ in s.checks)
+        if s.status == "NA":
+            assert strat.family in ("vwap", "orb", "gap") and s.na_reason and not s.checks
+            continue
         assert len(s.checks) == 3
         if s.status == "TRADE":
             assert passed == 3
@@ -65,7 +91,9 @@ def test_evaluate_status_matches_checks():
                 assert s.stop < s.entry < s.target
             else:
                 assert s.target < s.entry < s.stop
-            assert (s.target - s.entry) / (s.entry - s.stop) == pytest.approx(2.0)
+            assert s.rr is not None and s.rr > 0.3          # strategy-specific targets (2R, mean, zone...)
+            if strat.family in ("ma", "breakout", "macd", "smc", "levelbreak"):
+                assert s.rr == pytest.approx(2.0)
         elif s.status == "WATCH":
             assert passed >= 2
         else:
@@ -143,8 +171,9 @@ def test_full_report_text_and_chart(sent):
     a = report.analyze("SOLUSDT", "crypto", candles=candles(), change_pct=1.5)
     text = report.full_text(a, "summary here")
     assert "STRATEGY CHECK" in text and "FULL EXPLANATION" in text and "AI SUMMARY" in text
+    assert "➖" in text                     # intraday-only strategies are marked as not for a 4h chart
     for _, title in strategies.FAMILIES:
-        assert title in text
+        assert html.escape(title) in text
     assert len(report.card(a)) <= 1024
     assert all(len(c) <= 4096 for c in telegram.split_text(report.explanation(a, "summary")))
     best = a.best() or a.setups[0]
@@ -166,11 +195,22 @@ def test_commands_route_and_deliver(monkeypatch, sent):
     monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=3000: candles())
     main.handle("/analyze sol")
     kinds = [k[0] for k in sent]
-    assert kinds == ["photo", "text", "text"]          # trade card, strategy check, explanation
-    assert "SOL/USDT" in sent[0][2]
-    assert "STRATEGY CHECK" in sent[1][1] and "FULL EXPLANATION" in sent[2][1]
-    flat = [b for row in sent[2][2] for b in row]
-    assert ("🔄 Refresh", "a:c:SOLUSDT") in flat and ("📰 Crypto news", "n:c:crypto") in flat
+    assert kinds == ["photo", "text"]          # chart + trade card, strategy check (+ buttons)
+    assert "SOL/USDT" in sent[0][2] and "Live" in sent[0][2]
+    assert "STRATEGY CHECK" in sent[1][1] and "14️⃣" not in sent[1][1] and "<b>14.</b>" in sent[1][1]
+    flat = [b for row in sent[1][2] for b in row]
+    assert ("🔄 Re-analyse", "a:c:SOLUSDT:4h") in flat and ("📰 Crypto news", "n:c:crypto") in flat
+    assert ("📖 Strategy details", "d:c:SOLUSDT:4h") in flat and ("✅ 4h", "a:c:SOLUSDT:4h") in flat
+    assert ("⚡ 5m", "a:c:SOLUSDT:5m") in flat and ("📝 Paper trade", "pt:o:c:SOLUSDT:4h") in flat
+    sent.clear()
+    main.handle_callback("d:c:SOLUSDT:4h", "555")          # cached analysis -> strategy details
+    assert "STRATEGY DETAILS" in sent[0][1] and "Fibonacci" in sent[0][1]
+    sent.clear()
+    main.handle_callback("st:c:SOLUSDT:4h", "555")
+    assert "MARKET STRUCTURE" in sent[0][1]
+    sent.clear()
+    main.handle_callback("ob:c:SOLUSDT:4h", "555")
+    assert "LIVE VOLUME" in sent[0][1]
     sent.clear()
     main.handle("/help")
     assert "/crypto" in sent[0][1]
@@ -192,22 +232,22 @@ def test_crypto_ranking(monkeypatch, sent):
     main.handle("/crypto")
     listing, buttons = sent[0][1], sent[0][2]
     assert "CRYPTO SCANNER" in listing and "Skipped (no data): C3USDT" in listing
-    flat = [b for row in buttons[:-1] for b in row]   # last row: news + menu
+    flat = [b for row in buttons if row[0][1].startswith("a:") for b in row]   # symbol rows only
     assert len(flat) == 3 and flat[0][0].startswith("1. ")
     # numbers in the text match the buttons and the remembered list
     second = flat[1][1].split(":")[2]
     sent.clear()
     main.handle("2")
-    assert [k[0] for k in sent] == ["photo", "text", "text"]
+    assert [k[0] for k in sent] == ["photo", "text"]
     assert second[:-4] in sent[0][2]
     sent.clear()
     main.handle("9")
-    assert "Send /crypto or /stocks first" in sent[0][1]
+    assert "Send /crypto, /stocks or /forex first" in sent[0][1]
 
 
 def test_number_without_a_list(sent):
     main.handle("3")
-    assert "Send /crypto or /stocks first" in sent[0][1]
+    assert "Send /crypto, /stocks or /forex first" in sent[0][1]
 
 
 def test_button_taps(monkeypatch, sent):
@@ -222,7 +262,7 @@ def test_button_taps(monkeypatch, sent):
     monkeypatch.setattr(telegram, "confirm_updates", lambda uid: confirmed.append(uid))
     main.run_commands()
     assert confirmed == [8]
-    assert [k[0] for k in sent] == ["photo", "text", "text"] and "ETH/USDT" in sent[0][2]
+    assert [k[0] for k in sent] == ["photo", "text"] and "ETH/USDT" in sent[0][2]
 
 
 def test_commands_only_from_owner(monkeypatch, sent):

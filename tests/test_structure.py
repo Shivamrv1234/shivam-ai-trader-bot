@@ -82,7 +82,7 @@ def test_report_has_structure_and_flow_sections():
     text = report.full_text(a)
     assert "MARKET STRUCTURE &amp; KEY LEVELS" in text and "LIVE VOLUME &amp; ORDER BOOK" in text
     assert "buyers stronger" in text and "Biggest buy wall: 190.00" in text
-    assert len(a.setups) == 14 and "Order book: buyers stronger" in report.card(a)
+    assert len(a.setups) == 28 and "Order book: buyers stronger" in report.card(a)
 
 
 def test_crypto_orderflow_math(monkeypatch):
