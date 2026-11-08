@@ -1,5 +1,8 @@
 # SHIVAM AI TRADER — Telegram bot for crypto, NSE, F&O, forex & commodities
 
+# SETUP Guide(https://drive.google.com/file/d/1X_St2LjzHTm-xF8KKIf1y4MrmUnkOgVK/view?usp=sharing)
+# Bot Features(https://drive.google.com/file/d/1o6NrhzLhjkx_gkkAk07aRCaaFQYsjND-/view?usp=sharing)
+
 Telegram is where you see alerts, ask questions and paper-trade. The analysis runs on **GitHub Actions**
 (alerts), **Google Cloud Run** (instant replies) or **your own Windows PC** (`start_bot.bat`). The bot reads
 data only: it has **no code that can place orders** with any broker.
