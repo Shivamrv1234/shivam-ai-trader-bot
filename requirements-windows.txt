@@ -1,0 +1,3 @@
+# Optional, Windows only: live forex / gold / oil prices from a MetaTrader 5 terminal (e.g. Exness).
+# start_bot.bat installs this automatically; if it fails (no wheel for your Python version) the bot still works.
+MetaTrader5>=5.0.45; sys_platform == "win32"

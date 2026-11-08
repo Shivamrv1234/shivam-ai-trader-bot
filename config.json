@@ -39,18 +39,24 @@
     "indices": [
       "NIFTY",
       "BANKNIFTY"
-    ]
+    ],
+    "timeframe": "1d"
   },
   "risk": {
     "capital_inr": 15000,
     "capital_usdt": 100,
     "risk_per_trade_pct": 0.5,
-    "target_r": 2.0
+    "target_r": 2.0,
+    "capital_usd": 100,
+    "max_losing_trades_per_day": 3,
+    "max_daily_loss_pct": 2.0
   },
   "costs": {
     "crypto_pct_per_side": 0.1,
     "stocks_pct_per_side": 0.15,
-    "slippage_pct": 0.05
+    "slippage_pct": 0.05,
+    "forex_pct_per_side": 0.01,
+    "mcx_pct_per_side": 0.05
   },
   "alerts": {
     "max_per_run": 5
@@ -60,6 +66,84 @@
     "auto_snapshot": [
       "NIFTY",
       "BANKNIFTY"
+    ],
+    "risk_free_rate": 0.065,
+    "short_delta": 0.16,
+    "wing_strikes": 2
+  },
+  "forex": {
+    "timeframe": "1h",
+    "watchlist": [
+      "EURUSD",
+      "GBPUSD",
+      "USDJPY",
+      "AUDUSD",
+      "USDCAD",
+      "USDCHF",
+      "EURJPY",
+      "GBPJPY",
+      "XAUUSD",
+      "XAGUSD",
+      "USOIL",
+      "UKOIL",
+      "NATGAS",
+      "DXY"
+    ],
+    "inr": [
+      "USDINR",
+      "EURINR",
+      "GBPINR",
+      "JPYINR"
+    ],
+    "mcx": [
+      "GOLD",
+      "GOLDM",
+      "SILVER",
+      "SILVERM",
+      "CRUDEOIL",
+      "NATURALGAS",
+      "COPPER"
     ]
+  },
+  "paper": {
+    "default_qty_mode": "risk",
+    "max_open_per_user": 20
+  },
+  "pairs": [
+    [
+      "HDFCBANK",
+      "ICICIBANK"
+    ],
+    [
+      "TCS",
+      "INFY"
+    ],
+    [
+      "AXISBANK",
+      "KOTAKBANK"
+    ],
+    [
+      "BPCL",
+      "IOC"
+    ],
+    [
+      "TATASTEEL",
+      "JSWSTEEL"
+    ],
+    [
+      "HINDUNILVR",
+      "ITC"
+    ],
+    [
+      "SBIN",
+      "BANKBARODA"
+    ],
+    [
+      "NIFTY",
+      "BANKNIFTY"
+    ]
+  ],
+  "news": {
+    "max_age_hours": 36
   }
 }

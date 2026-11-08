@@ -104,7 +104,24 @@ if [ "${1:-}" = "disconnect" ]; then
 fi
 
 echo "Turning on the needed Google Cloud services (first time takes a minute)..."
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com --quiet
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
+  storage.googleapis.com --quiet
+
+# Paper trades and approved group chats live in a small JSON file in Cloud Storage (Cloud Run's own disk is
+# wiped on every restart). Regional buckets in us-central1 are inside Google's free tier (5 GB).
+BUCKET="${BUCKET:-${PROJECT}-shivam-bot-data}"
+if ! gcloud storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
+  echo "Creating the storage bucket gs://${BUCKET} for paper trades..."
+  gcloud storage buckets create "gs://${BUCKET}" --location="$REGION" --uniform-bucket-level-access --quiet
+fi
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+RUN_SA="$(gcloud run services describe "$SERVICE" --region "$REGION" \
+          --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true)"
+RUN_SA="${RUN_SA:-${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
+echo "Letting the bot (${RUN_SA}) read and write only that bucket..."
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" --member="serviceAccount:${RUN_SA}" \
+  --role="roles/storage.objectAdmin" --quiet >/dev/null
+BOT_STORE="gs://${BUCKET}/store.json"
 
 EXISTS="no"
 if gcloud run services describe "$SERVICE" --region "$REGION" >/dev/null 2>&1; then EXISTS="yes"; fi
@@ -121,6 +138,9 @@ ANGEL_PIN="$(ask_secret ANGEL_PIN)"
 ANGEL_TOTP_SECRET="$(ask_secret ANGEL_TOTP_SECRET)"
 GEMINI_API_KEY="$(ask_secret 'GEMINI_API_KEY (optional)')"
 GEMINI_MODEL="$(ask_plain 'GEMINI_MODEL (optional, e.g. a current Flash model ID)')"
+TWELVE_DATA_API_KEY="$(ask_secret 'TWELVE_DATA_API_KEY (optional: live forex/gold)')"
+ALLOWED_CHATS="$(ask_plain 'ALLOWED_CHATS (optional: group IDs, comma separated; or use /allow in the group)')"
+ALERT_CHATS="$(ask_plain 'ALERT_CHATS (optional: extra chats that also get alerts)')"
 
 if [ "$EXISTS" = "no" ] && { [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; }; then
   echo "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required on the first deploy."
@@ -132,11 +152,12 @@ ENVFILE="$(mktemp)"
 chmod 600 "$ENVFILE"
 trap 'rm -f "$ENVFILE"' EXIT
 export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ANGEL_API_KEY ANGEL_CLIENT_CODE ANGEL_PIN ANGEL_TOTP_SECRET \
-       GEMINI_API_KEY GEMINI_MODEL
+       GEMINI_API_KEY GEMINI_MODEL TWELVE_DATA_API_KEY ALLOWED_CHATS ALERT_CHATS BOT_STORE
 python3 - "$ENVFILE" <<'PY'
 import json, os, sys
 keys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PIN",
-        "ANGEL_TOTP_SECRET", "GEMINI_API_KEY", "GEMINI_MODEL"]
+        "ANGEL_TOTP_SECRET", "GEMINI_API_KEY", "GEMINI_MODEL", "TWELVE_DATA_API_KEY", "ALLOWED_CHATS",
+        "ALERT_CHATS", "BOT_STORE"]
 vals = {k: os.environ.get(k, "").strip() for k in keys}
 vals = {k: v for k, v in vals.items() if v}
 with open(sys.argv[1], "w") as fh:
@@ -191,3 +212,5 @@ echo
 echo "Done. Send /start to your bot: it should reply within seconds (the first reply after a quiet"
 echo "period can take 10-20 seconds while the server wakes up)."
 echo "Now open GitHub -> Actions -> 'Bot commands' -> '...' -> Disable workflow (alerts keep running)."
+echo "Paper trades are saved in ${BOT_STORE}."
+echo "Groups: add the bot to a group, then send /allow there (only you, the owner, can approve a group)."

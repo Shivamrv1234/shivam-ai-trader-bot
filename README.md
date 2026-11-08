@@ -1,59 +1,104 @@
-# SHIVAM AI TRADER — Telegram bot on GitHub Actions
+# SHIVAM AI TRADER — Telegram bot for crypto, NSE, F&O, forex & commodities
 
-No PC and no server to manage. GitHub runs the analysis on a schedule, and Telegram is where you see
-alerts and ask questions.
+Telegram is where you see alerts, ask questions and paper-trade. The analysis runs on **GitHub Actions**
+(alerts), **Google Cloud Run** (instant replies) or **your own Windows PC** (`start_bot.bat`). The bot reads
+data only: it has **no code that can place orders** with any broker.
 
-# [ View Setup Guide PDF ](https://drive.google.com/file/d/1kKTuWmxFusa_xTigLlfygH-ax-vRlQN2/view?usp=sharing)
-# [ View Bot Features PDF ](https://drive.google.com/file/d/1977K4nUY73Jk2ChSh0Osi2W9Te8YgfKZ/view?usp=sharing)
+## What you get in Telegram
 
-**How it works in Telegram**
-1. Send `/start` for the menu, or `/crypto` (or `/stocks`).
-2. You get a **numbered list**: 🟢 BUY setups, 🔴 SELL setups, ⚖️ mixed, 🟡 forming, ⚪ no setup.
-3. **Tap a number** (or send it, e.g. `2`). You receive three messages:
-   - ① **Chart + trade card:** BUY or SELL, 🎯 entry, 💰 take profit, 🛑 stop-loss, reward:risk,
-     position size for your capital, order-book reading
-   - ② **Strategy check:** the 7 strategies with 🟢 ready / 🟡 forming / ⚪ none
-   - ③ **Full explanation:** every condition ✅/❌ with real numbers, history of each strategy on this
-     symbol, market structure and levels, live order book, optional Gemini AI summary
-4. Under the explanation of an NSE stock you get buttons: **📊 Option chain**, **📈 Futures**,
-   **🏢 Fundamentals** and **📰 News** for that stock.
-5. You can also send a symbol directly: `ETH`, `RELIANCE`, `NIFTY`, or a company name such as `tata motors`.
-
-**All commands** (or use the buttons in `/start`)
+1. `/start` → the button menu: 🪙 Crypto · 📈 NSE Stocks · 💱 Forex · 🔎 Any NSE stock · 🏢 Fundamentals ·
+   📊 Option chain · 🧮 Greeks · 🧠 F&O Plan · 📈 Futures · 🔥 OI build-up · 🌡 India VIX · 📰 News ·
+   💼 Paper trades · ⚖️ Pairs · 📚 Strategies · ⚙️ Settings · ❓ Help
+2. A scanner (`/crypto`, `/stocks`, `/forex`) gives a **numbered list** with live prices:
+   🟢 BUY · 🔴 SELL · ⚖️ mixed · 🟡 forming · ⚪ none. **Tap a number** (or send it).
+3. For any asset you get two clean messages:
+   - ① **Chart + trade card:** 💹 live price, BUY/SELL, 🎯 entry, 💰 take profit, 🛑 stop-loss,
+     reward:risk, size for your capital, 🌡 **India VIX** with its good/bad reading (Indian assets)
+   - ② **Strategy check:** all **14 strategies** numbered with 🟢 BUY / 🔴 SELL / 🟡 forming / ⚪ none /
+     ➖ not for this chart, the market regime (trending/ranging) and the verdict
+4. Buttons under the strategy check:
+   - ⏱ **Timeframes:** ⚡ 5m · 15m (scalp) · ☀️ 30m · 1h (intraday) · 🌊 4h · 1D (swing)
+   - 📖 **Strategy details** (every condition ✅/❌ with numbers, targets, size, history)
+   - 🧭 **Structure & levels** · 📊 **Volume & order book** · 🌡 **Volatility / VIX**
+   - ⛓ Option chain · 🧮 Greeks · 🧠 F&O plan · 📈 Futures (F&O stocks and indices)
+   - 🏢 Fundamentals · 📰 News · 📝 **Paper trade** · 🔄 **Re-analyse**
+5. Send anything directly: `ETH`, `RELIANCE 15m`, `NIFTY`, `XAUUSD 1h`, `GOLD` (MCX), `tata motors`.
 
 | Command | What you get |
 | --- | --- |
-| `/crypto`, `/stocks` | Numbered scanner lists |
-| `/stock TATAMOTORS` | Full analysis of **any NSE stock** |
-| `/search tata` | Matching NSE symbols as buttons |
-| `/fundamentals INFY` | Valuation, profitability, debt, growth, last quarters, health check (Yahoo data) |
-| `/fno NIFTY` | Option chain, PCR, max pain, OI chart, Greeks and an option trade idea |
-| `/futures RELIANCE` | All expiries, basis, cost of carry, OI build-up, chart and a futures trade plan |
-| `/buildup` | Today's long/short build-up across F&O stocks |
-| `/news`, `/news india`, `/news world`, `/news crypto`, `/news RELIANCE` | 10 stories per page, each linked to the sectors, stocks or crypto it can move; **Next ▶️** for more; send a story's number for the full story |
+| `/crypto [tf]`, `/stocks [tf]`, `/forex [tf]` | Numbered scanner lists (e.g. `/stocks 15m`) |
+| `/analyze X [tf]`, `/stock X [tf]` | Any coin, NSE stock/index, forex pair or commodity |
+| `/fundamentals INFY` | Key ratios 🟢/🔴 first, then **📑 Detailed fundamentals** (ROCE, PEG, EV/EBITDA, interest cover, 3-yr CAGR, cash conversion, quarterly & yearly tables) |
+| `/fno NIFTY` | Option chain, PCR, max pain, OI chart, option idea |
+| `/greeks NIFTY` | **Per-strike** delta, gamma, theta, vega, IV + chart + IV skew |
+| `/plan NIFTY` | **F&O plan:** recommended trade + ⚡ option buying, 💰 credit spread, 🦅 iron condor, 🛡 hedging — legs, credit/debit, max profit/loss, breakevens, chance of profit, position Greeks, payoff chart, exit plan |
+| `/futures RELIANCE`, `/buildup` | Futures report and market-wide OI build-up |
+| `/vix` | India VIX with the scale (🟢 calm … 🔴 fear), 1-year chart and what it means for buyers/sellers |
+| `/news [india/forex/crypto/other/SYMBOL]` | Newest first, each story with its age ⏱, 🟢 good / 🔴 bad tone and **bold** asset names; tabs 🇮🇳 Indian Markets · 💱 Forex · 🪙 Crypto · 🌐 Other |
+| `/paper`, `/paper buy ETH`, `/exit 3`, `/history`, `/board` | Paper trading: many trades, live P&L %, auto stop/target, exit button, group leaderboard |
+| `/pairs`, `/pair TCS INFY` | Pairs trading: cointegration test, hedge ratio, z-score signal and chart |
+| `/strategies`, `/settings`, `/help`, `/id` | Reference |
 
-**Automatic alerts** use the same three-message format: crypto after every 4h candle, stocks at 16:10 IST
-on weekdays (only **fresh** BUY/SELL signals), and F&O snapshots for NIFTY and BANKNIFTY at 09:45 and
-14:30 IST on weekdays.
+## The 14 strategies (no overlaps)
 
-**Data:** crypto is live from Binance. Indian stocks, indices and F&O are live from **your Angel One
-account** once you add its secrets (step 7). Without them, stocks fall back to delayed Yahoo data and
-F&O is off. The bot reads data only; it has no code that can place orders.
+| # | Strategy | Built from |
+| --- | --- | --- |
+| 1 | MA Crossover (9/21 intraday, 20/50 swing, 200-EMA + ADX filters) | old EMA Trend Cross + "MA crossover" |
+| 2 | 20-Candle Breakout / Breakdown | kept |
+| 3 | EMA Pullback 20/50/200 | old RSI Pullback + "EMA pullback" |
+| 4 | MACD Momentum | kept |
+| 5 | Demand/Supply Zone + Confluence (S/R, Fib 61.8%, 200 EMA) | old S/R Reaction + "S&D + confluence" |
+| 6 | Smart Money BOS + Order Block/FVG | kept |
+| 7 | Trendline / Round Number | kept |
+| 8 | Fibonacci Golden Zone (50–61.8%, targets 0% / 127.2% / 161.8%) | new |
+| 9 | Break & Retest | new |
+| 10 | RSI(2) Mean Reversion (Connors) | new |
+| 11 | Bollinger Band Mean Reversion (ADX < 20) | new |
+| 12 | VWAP Pullback (intraday) | new |
+| 13 | Opening Range Breakout 09:15–09:30 (NSE 5m/15m) | new |
+| 14 | Gap Fill (NSE intraday) | new |
 
-**Strategies:** 7, each with a BUY version and a mirrored SELL version: EMA Trend Cross, 20-Candle Breakout, RSI Pullback in Uptrend,
-MACD Momentum, **Support/Demand Bounce (price action)**, **Smart Money: BOS + Order Block/FVG Retest**, and
-**Trendline / Round-Number Breakout**.
+Option selling (iron condor) is in the 🧠 F&O plan and pairs trading in ⚖️ Pairs, because they need an option
+chain or two stocks. Every strategy has BUY and mirrored SELL rules, uses completed candles only (tested
+for look-ahead) and shows its own backtest on that symbol (entry next open, fees, slippage, exit rules,
+time stops). Win rates quoted online are not guarantees: check each strategy's history line.
 
-**Market structure on every chart and message:** support and resistance (with touch counts),
-psychological round numbers, trend lines, demand and supply zones, order blocks, fair-value gaps,
-BOS/CHoCH structure breaks and swing labels (HH/HL/LH/LL). All levels are computed only from candles
-that existed at that moment, so the backtests can't see the future.
+## Data sources (live where possible)
 
-**Live volume and order book** in every `/analyze`: buy vs sell pressure near the price, the biggest
-buy and sell walls, spread, share of aggressive buying, and today's volume pace. Crypto uses Binance's
-public order book; NSE uses Angel One market depth (market hours only). It's shown as context, not as a
-signal, because order books change in seconds and large orders can be fake. They are well-known textbook setups, not guaranteed winners. That's why every message shows
-the backtest record. Treat everything as paper-trading practice, not financial advice.
+| Market | Source |
+| --- | --- |
+| Crypto | Binance public API — live (Kraken fallback) |
+| NSE stocks, indices, F&O, futures, India VIX | **Angel One SmartAPI** — live (Yahoo delayed fallback) |
+| USDINR, EURINR, GBPINR, JPYINR; MCX gold, silver, crude, natural gas, copper | **Angel One** (CDS/MCX) — live |
+| EURUSD & other pairs, XAU/USD, XAG/USD, oil, gas, DXY | **MetaTrader 5 / Exness** (PC mode, live) → **Twelve Data** (free key, live) → Yahoo (fallback) |
+| Fundamentals | Yahoo Finance statements, ratios computed Tickertape/Screener-style (links to both) |
+| News | Moneycontrol (via Google News + its RSS), Economic Times, Mint, CoinDesk, Cointelegraph, BBC, Google News |
+
+**Exness:** Exness has no separate data API; prices come through the MetaTrader 5 terminal, whose Python
+package works only on Windows. So Exness prices are used when the bot runs on your PC (`start_bot.bat`) with
+MT5 open and logged in (a demo account is enough; prefer the **investor/read-only** password). On Cloud Run,
+use a free Twelve Data key for live forex.
+
+## Groups
+
+1. Add the bot to a Telegram group.
+2. You (the owner, `TELEGRAM_CHAT_ID`) send **`/allow`** in that group. `/deny` removes it. `/id` shows IDs.
+3. Members use commands (`/analyze ETH`, `/crypto`, `/paper`) or reply to the bot's messages. The bot
+   replies to the member's message and names them; each member has their own lists and paper trades.
+4. By default Telegram's *privacy mode* lets bots see only commands, replies and @mentions in groups — that
+   is what the bot needs, and it ignores ordinary chat. To type plain symbols like `ETH` in a group, either
+   reply to the bot, mention it (`@yourbot ETH`), or turn privacy off in @BotFather (`/setprivacy` →
+   Disable) and re-add the bot.
+
+## Paper trading
+
+Tap **📝 Paper trade** under any analysis → **🟢 Paper BUY** or **🔴 Paper SELL**. The trade opens at the
+live price with the setup's stop and target (or 1.5 ATR / 2R), sized by your risk setting. **💼 Paper
+trades** shows every open trade with live price, P&L in % and money, R multiple, distance to stop and
+target, and an **❌ Exit** button. Stops and targets hit while you were away are detected from 5-minute
+candles. **📜 History** shows win rate and totals; **🏆 Board** ranks group members. It warns after
+3 losing trades or a 2% loss in a day. Trades are saved in Google Cloud Storage on Cloud Run (the deploy
+script creates the bucket), in `.state/store.json` on your PC, and in the workflow cache on GitHub.
 
 ---
 
@@ -107,6 +152,9 @@ In the repo: **Settings → Secrets and variables → Actions**.
 | `ANGEL_CLIENT_CODE` | your Angel One client ID |
 | `ANGEL_PIN` | your Angel One login PIN |
 | `ANGEL_TOTP_SECRET` | the text secret from step 2 |
+
+Optional secrets (same place): `TWELVE_DATA_API_KEY` (live forex/gold), `ALLOWED_CHATS` (group IDs),
+`ALLOWED_USERS` (only these user IDs), `ALERT_CHATS` (extra chats that get alerts).
 
 **Security:** together these four values can log in to your trading account. GitHub encrypts secrets and
 hides them in logs, and this bot never places orders. Never share them, and turn on two-factor login for
@@ -165,6 +213,25 @@ deploying. When the
 free trial ends you must upgrade the billing account to keep the service running; the free tier still
 applies after that. Set a budget alert in **Billing → Budgets & alerts**.
 
+## Run on your own PC or a cloud VM
+
+Windows: double-click `start_bot.bat` (first run installs everything and opens `.env` for your values).
+Linux/macOS/VM: `./start_bot.sh`. Or manually:
+
+```
+python -m venv .venv            # Windows: py -3.12 -m venv .venv
+.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+copy .env.example .env          # Linux/macOS: cp; then fill in your values
+python -m bot.main local        # instant replies + scheduled alerts; Ctrl+C to stop
+python -m bot.main local --no-alerts   # replies only; GitHub keeps sending alerts
+```
+
+Only one place may answer messages: if Cloud Run is connected, run `python -m bot.main webhook delete`
+first, and disable GitHub's "Bot commands" workflow. If the PC/VM sends alerts, disable GitHub's
+"Market alerts" workflow. The full steps (including a Google Cloud VM as a service) are in
+`SHIVAM_AI_TRADER_Setup_Guide_A_to_Z.pdf`.
+
 ## Good to know
 
 - **Costs:** public repositories get free GitHub Actions minutes. Your code is visible to others, but
@@ -183,5 +250,5 @@ applies after that. Set a budget alert in **Billing → Budgets & alerts**.
 - **No trading:** this bot never places orders and needs no exchange or broker API keys.
 
 ## Run the tests
-`python -m pytest -q` runs 80 offline tests with simulated data. They also run automatically on GitHub
+`python -m pytest -q` runs 84 offline tests with simulated data. They also run automatically on GitHub
 after every change, in the Self-test workflow.
