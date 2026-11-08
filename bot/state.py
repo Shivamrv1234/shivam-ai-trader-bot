@@ -40,9 +40,10 @@ def touch() -> None:
 WAIT_SECONDS = 15 * 60
 
 
-def remember_list(chat_id: str, market: str, symbols: list[str]) -> None:
+def remember_list(chat_id: str, market: str, symbols: list[str], tf: str | None = None) -> None:
     st = load()
-    st.setdefault("lists", {})[str(chat_id)] = {"market": market, "symbols": symbols, "ts": int(time.time())}
+    st.setdefault("lists", {})[str(chat_id)] = {"market": market, "symbols": symbols, "tf": tf,
+                                                "ts": int(time.time())}
     st.setdefault("last_kind", {})[str(chat_id)] = "scan"
     save(st)
 
@@ -90,9 +91,23 @@ def take_wait(chat_id: str) -> str | None:
     return None
 
 
-def pick(chat_id: str, number: int) -> tuple[str, str] | None:
-    """(market, symbol) for list item `number` (1-based), or None."""
+def pick(chat_id: str, number: int) -> tuple[str, str, str | None] | None:
+    """(market, symbol, timeframe) for list item `number` (1-based), or None."""
     entry = load().get("lists", {}).get(str(chat_id))
     if not entry or not (1 <= number <= len(entry["symbols"])):
         return None
-    return entry["market"], entry["symbols"][number - 1]
+    return entry["market"], entry["symbols"][number - 1], entry.get("tf")
+
+
+def pending_wait(chat_id: str) -> bool:
+    """A menu question is waiting for this user's answer (doesn't use it up)."""
+    entry = load().get("wait", {}).get(str(chat_id))
+    return bool(entry and time.time() - entry.get("ts", 0) <= WAIT_SECONDS)
+
+
+def recent_list(chat_id: str, seconds: int = WAIT_SECONDS) -> bool:
+    """This user got a numbered list (scanner or news) in the last 15 minutes."""
+    st = load()
+    ts = max(st.get("lists", {}).get(str(chat_id), {}).get("ts", 0),
+             st.get("news", {}).get(str(chat_id), {}).get("ts", 0))
+    return time.time() - ts <= seconds

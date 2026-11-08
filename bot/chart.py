@@ -80,8 +80,17 @@ def _draw_structure(ax, snap, offset: int, bars: int, lo: float, hi: float) -> N
                     va="bottom" if d > 0 else "top", ha="right")
 
 
-def render(x: pd.DataFrame, title: str, setup=None, snap=None, bars: int = 120) -> bytes:
+def plain(text: str) -> str:
+    """Chart fonts have no emoji: drop them from titles (₹ and accents stay)."""
+    out = "".join(ch for ch in text if not (ord(ch) >= 0x1F000 or 0x2600 <= ord(ch) <= 0x27BF or ord(ch) == 0xFE0F))
+    return " ".join(out.split())
+
+
+def render(x: pd.DataFrame, title: str, setup=None, snap=None, bars: int = 120, live: float | None = None) -> bytes:
+    title = plain(title)
     d = x.tail(bars).copy()
+    has_vol = bool((d["volume"] > 0).mean() > 0.5)
+    rsi_panel = 2 if has_vol else 1
     offset = len(x) - len(d)
     d.index = d.index.tz_convert("Asia/Kolkata").tz_localize(None)
     plots = [
@@ -91,11 +100,11 @@ def render(x: pd.DataFrame, title: str, setup=None, snap=None, bars: int = 120) 
     if d["ema200"].notna().all():
         plots.append(mpf.make_addplot(d["ema200"], color="#8e44ad", width=1.0, secondary_y=False))
     plots += [
-        mpf.make_addplot(d["rsi14"], panel=2, color="#34495e", width=1, ylabel="RSI 14",
+        mpf.make_addplot(d["rsi14"], panel=rsi_panel, color="#34495e", width=1, ylabel="RSI 14",
                          ylim=(0, 100), secondary_y=False),
-        mpf.make_addplot(pd.Series(70.0, index=d.index), panel=2, color="#c0392b", linestyle="--",
+        mpf.make_addplot(pd.Series(70.0, index=d.index), panel=rsi_panel, color="#c0392b", linestyle="--",
                          width=0.7, secondary_y=False),
-        mpf.make_addplot(pd.Series(30.0, index=d.index), panel=2, color="#27ae60", linestyle="--",
+        mpf.make_addplot(pd.Series(30.0, index=d.index), panel=rsi_panel, color="#27ae60", linestyle="--",
                          width=0.7, secondary_y=False),
     ]
     lo, hi = float(d["low"].min()), float(d["high"].max())
@@ -111,12 +120,17 @@ def render(x: pd.DataFrame, title: str, setup=None, snap=None, bars: int = 120) 
     lo, hi = lo - pad, hi + pad
     style = mpf.make_mpf_style(base_mpf_style="yahoo", gridstyle=":", y_on_right=True)
     fig, axes = mpf.plot(
-        d, type="candle", style=style, addplot=plots, volume=True, panel_ratios=(5, 1.3, 1.8),
+        d, type="candle", style=style, addplot=plots, volume=has_vol,
+        panel_ratios=(5, 1.3, 1.8) if has_vol else (5, 1.8),
         figsize=(12, 9), returnfig=True, ylim=(lo, hi), ylabel="", **kwargs,
     )
     if snap is not None:
         _draw_structure(axes[0], snap, offset, len(d), lo, hi)
         axes[0].set_xlim(-1, len(d) + 11)
+    if live and lo <= live <= hi:
+        axes[0].axhline(live, color="#0984e3", linewidth=1.1, linestyle=(0, (1, 1)), zorder=7)
+        axes[0].text(len(d) - 1, live, f" LIVE {_fmt(live)} ", fontsize=8, color="white", va="center", ha="left",
+                     zorder=8, bbox=dict(boxstyle="round,pad=0.2", facecolor="#0984e3", edgecolor="none"))
     fig.suptitle(title, fontsize=12, fontweight="bold", y=0.985)
     legend = "EMA21 orange · EMA50 blue · EMA200 purple"
     if "hlines" in kwargs:

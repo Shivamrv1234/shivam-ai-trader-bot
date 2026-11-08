@@ -38,8 +38,11 @@ INDEX_ALIASES = {
     "FINNIFTY": ["NIFTY FIN SERVICE", "FINNIFTY"],
     "MIDCPNIFTY": ["NIFTY MID SELECT", "MIDCPNIFTY"],
     "SENSEX": ["SENSEX"],
+    "INDIAVIX": ["INDIA VIX", "INDIAVIX"],
 }
-YAHOO_INDEX = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
+YAHOO_INDEX = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "INDIAVIX": "^INDIAVIX", "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+               "SENSEX": "^BSESN"}
+NO_FNO_INDEX = {"INDIAVIX"}
 BUILDUP_TYPES = ["Long Built Up", "Short Built Up", "Short Covering", "Long Unwinding"]
 
 
@@ -88,7 +91,7 @@ def load_instruments(raw: list | None = None) -> pd.DataFrame:
     missing = need - set(df.columns)
     if missing:
         raise AngelError(f"Instrument list format changed, missing {sorted(missing)}")
-    df = df[df["exch_seg"].isin(["NSE", "NFO"])].copy()
+    df = df[df["exch_seg"].isin(["NSE", "NFO", "MCX", "CDS"])].copy()
     df["strike_rs"] = pd.to_numeric(df["strike"], errors="coerce") / 100  # paise -> rupees
     df["lot"] = pd.to_numeric(df["lotsize"], errors="coerce")
     df["exp"] = df["expiry"].map(parse_expiry)
@@ -129,6 +132,8 @@ def search_equities(inst: pd.DataFrame, query: str, limit: int = 8) -> list[str]
 
 def has_fno(inst: pd.DataFrame, name: str) -> bool:
     n = name.upper()
+    if n in NO_FNO_INDEX:
+        return False
     nfo = inst[(inst["exch_seg"] == "NFO") & (inst["name_u"] == n)]
     return bool(len(nfo))
 
@@ -140,6 +145,21 @@ def all_futures(inst: pd.DataFrame, name: str, today: date | None = None) -> pd.
     f = inst[(inst["exch_seg"] == "NFO") & (inst["name_u"] == n) & inst["instrumenttype"].isin(["FUTIDX", "FUTSTK"])]
     f = f[f["exp"].notna() & (f["exp"] >= today)]
     return f.sort_values("exp")
+
+
+def near_future(inst: pd.DataFrame, name: str, exch: str, today: date | None = None, roll_days: int = 3) -> pd.Series:
+    """Near-month MCX commodity or CDS currency future (rolls to the next month a few days before expiry,
+    when trading moves there)."""
+    today = today or datetime.now(IST).date()
+    n = name.upper()
+    kinds = ["FUTCOM"] if exch == "MCX" else ["FUTCUR"]
+    f = inst[(inst["exch_seg"] == exch) & (inst["name_u"] == n) & inst["instrumenttype"].isin(kinds)]
+    f = f[f["exp"].notna() & (f["exp"] >= today)].sort_values("exp")
+    if not len(f):
+        raise AngelError(f"No live {exch} future for {n}")
+    if len(f) > 1 and (f.iloc[0]["exp"] - today).days <= roll_days:
+        return f.iloc[1]
+    return f.iloc[0]
 
 
 @dataclass
@@ -216,7 +236,7 @@ class Angel:
     def candles(self, token: str, exchange: str = "NSE", interval: str = "ONE_DAY", days: int = 700) -> pd.DataFrame:
         to_dt = datetime.now(IST)
         params = {"exchange": exchange, "symboltoken": token, "interval": interval,
-                  "fromdate": (to_dt - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
+                  "fromdate": (to_dt - timedelta(days=days)).strftime("%Y-%m-%d 00:00"),
                   "todate": to_dt.strftime("%Y-%m-%d %H:%M")}
         rows = self._ok(self.api.getCandleData(params), "Candles")
         if not rows:
@@ -303,9 +323,9 @@ class Angel:
         ser = pd.Series(dict(pts)).sort_index()
         return ser[~ser.index.duplicated(keep="last")]
 
-    def spot_candles(self, name: str) -> pd.DataFrame:
+    def spot_candles(self, name: str, interval: str = "ONE_DAY", days: int = 700) -> pd.DataFrame:
         u = find_underlying(self.inst, name)
-        return self.candles(u.spot_token, u.spot_exchange)
+        return self.candles(u.spot_token, u.spot_exchange, interval, days)
 
     def ltp(self, name: str) -> dict:
         u = find_underlying(self.inst, name)
@@ -339,6 +359,9 @@ class Leg:
     delta: float | None = None
     iv: float | None = None
     theta: float | None = None
+    gamma: float | None = None
+    vega: float | None = None
+    greeks_src: str = ""         # "Angel One" or "computed" (Black-Scholes from the live premium)
 
 
 @dataclass
@@ -447,22 +470,30 @@ def build_snapshot(a: Angel, name: str, strikes_each_side: int = 10) -> FnoSnaps
             leg.delta = num(pick(g, "delta"), None)
             leg.iv = num(pick(g, "impliedVolatility", "iv"), None)
             leg.theta = num(pick(g, "theta"), None)
+            leg.gamma = num(pick(g, "gamma"), None)
+            leg.vega = num(pick(g, "vega"), None)
+            leg.greeks_src = "Angel One"
         snap.legs.append(leg)
     return snap
 
 
 # ---------------------------------------------------------------- live volume + order book (NSE)
 
-def orderflow(a: Angel, name: str, avg_daily_volume: float | None = None) -> dict | None:
+def orderflow(a: Angel, name: str, avg_daily_volume: float | None = None, token: str | None = None,
+              exch: str | None = None, label: str | None = None) -> dict | None:
     """Market depth (best 5 bids/asks), total pending buy/sell quantity and today's volume.
-    Indices have no order book, so their near-month future is used."""
-    u = find_underlying(a.inst, name)
-    token, exch, label = u.spot_token, "NSE", u.name
-    if u.kind == "index":
-        futs, _, _ = derivatives(a.inst, u.name)
-        if not len(futs):
-            return None
-        token, exch, label = str(futs.iloc[0]["token"]), "NFO", str(futs.iloc[0]["symbol"])
+    Indices have no order book, so their near-month future is used. MCX/CDS futures pass their own token."""
+    if token is None:
+        u = find_underlying(a.inst, name)
+        token, exch, label = u.spot_token, "NSE", u.name
+        if u.kind == "index":
+            if u.name in NO_FNO_INDEX:
+                return None
+            futs, _, _ = derivatives(a.inst, u.name)
+            if not len(futs):
+                return None
+            token, exch, label = str(futs.iloc[0]["token"]), "NFO", str(futs.iloc[0]["symbol"])
+    exch, label = exch or "NSE", label or name
     try:
         q = a.quotes({exch: [token]})
     except AngelError as exc:
@@ -487,7 +518,7 @@ def orderflow(a: Angel, name: str, avg_daily_volume: float | None = None) -> dic
     bids, asks = side("buy"), side("sell")
     tot_buy = num(pick(q, "totBuyQuan", "totalBuyQuantity"))
     tot_sell = num(pick(q, "totSellQuan", "totalSellQuantity"))
-    flow = {"venue": f"Angel One ({label})", "unit": "INR"}
+    flow = {"venue": f"Angel One ({label})", "unit": "INR", "top_bids": bids[:5], "top_asks": asks[:5]}
     if tot_buy and tot_sell:
         flow["imbalance"] = tot_buy / tot_sell
         flow["tot_buy_qty"], flow["tot_sell_qty"] = tot_buy, tot_sell
@@ -504,7 +535,7 @@ def orderflow(a: Angel, name: str, avg_daily_volume: float | None = None) -> dic
         frac = min(max(mins / 375, 0.05), 1.0) if now.weekday() < 5 else 1.0
         flow["volume_pace"] = vol / frac / avg_daily_volume
         flow["volume_today"] = vol
-    if len(flow) <= 2:
+    if len(flow) <= 4:
         return None
     return flow
 

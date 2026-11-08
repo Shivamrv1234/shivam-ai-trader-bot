@@ -34,28 +34,56 @@ def google_news(query: str) -> str:
     return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
 
 
+def mc(query: str) -> str:
+    """Moneycontrol stories through Google News (Moneycontrol's own RSS feeds are often stale)."""
+    return google_news(f"site:moneycontrol.com {query} when:1d")
+
+
+MC_RSS = "https://www.moneycontrol.com/rss/"
 FEEDS = {
     "india": [
+        ("Moneycontrol", mc("(markets OR stocks OR Sensex OR Nifty OR shares)")),
+        ("Moneycontrol", mc("(RBI OR SEBI OR economy OR results OR IPO)")),
+        ("Moneycontrol", MC_RSS + "marketreports.xml"),
+        ("Moneycontrol", MC_RSS + "buzzingstocks.xml"),
+        ("Moneycontrol", MC_RSS + "latestnews.xml"),
         ("Economic Times", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
         ("Economic Times", "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms"),
         ("Economic Times", "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms"),
         ("Mint", "https://www.livemint.com/rss/markets"),
         ("Google News", google_news("(Sensex OR Nifty OR RBI OR SEBI) when:1d")),
     ],
-    "world": [
-        ("Google News", google_news("(geopolitics OR war OR sanctions OR tariffs OR OPEC OR \"Federal Reserve\") "
-                                    "markets when:1d")),
-        ("Google News", google_news("(\"crude oil\" OR \"US Fed\" OR \"dollar index\" OR \"bond yields\") when:1d")),
-        ("Economic Times", "https://economictimes.indiatimes.com/news/international/rssfeeds/858478126.cms"),
-        ("BBC", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+    "forex": [
+        ("Moneycontrol", mc("(rupee OR forex OR currency OR dollar)")),
+        ("Moneycontrol", mc("(gold OR silver OR \"crude oil\" OR commodity OR MCX)")),
+        ("Moneycontrol", MC_RSS + "currency.xml"),
+        ("Moneycontrol", MC_RSS + "commodities.xml"),
+        ("Google News", google_news("(rupee OR \"dollar index\" OR forex OR \"EUR/USD\" OR yen) when:1d")),
+        ("Google News", google_news("(\"gold price\" OR \"crude oil\" OR Brent OR \"silver price\" OR OPEC) when:1d")),
     ],
     "crypto": [
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
         ("Cointelegraph", "https://cointelegraph.com/rss"),
         ("Economic Times", "https://economictimes.indiatimes.com/markets/cryptocurrency/rssfeeds/82519373.cms"),
+        ("Moneycontrol", mc("(crypto OR bitcoin OR ethereum)")),
+    ],
+    "other": [
+        ("Google News", google_news("(geopolitics OR war OR sanctions OR tariffs OR OPEC OR \"Federal Reserve\") "
+                                    "markets when:1d")),
+        ("Google News", google_news("(\"US Fed\" OR \"bond yields\" OR \"Wall Street\" OR \"China economy\") when:1d")),
+        ("Moneycontrol", mc("(global OR \"world markets\" OR Fed OR geopolitics)")),
+        ("Economic Times", "https://economictimes.indiatimes.com/news/international/rssfeeds/858478126.cms"),
+        ("BBC", "https://feeds.bbci.co.uk/news/world/rss.xml"),
     ],
 }
-CATEGORIES = {"all": "🌍 All", "india": "🇮🇳 India", "world": "🌐 World", "crypto": "🪙 Crypto"}
+FEEDS["world"] = FEEDS["other"]   # old name
+CATEGORIES = {"all": "🌍 All", "india": "🇮🇳 Indian Markets", "forex": "💱 Forex", "crypto": "🪙 Crypto",
+              "other": "🌐 Other"}
+CAT_ALIASES = {"world": "other", "indian": "india", "market": "india", "markets": "india", "fx": "forex",
+               "commodity": "forex", "commodities": "forex", "currency": "forex", "global": "other"}
+FOREX_RULES = {"rupee", "crude", "gold", "fed", "forex"}
+INDIA_RULES = {"rbi", "sebi", "flows", "bank", "it", "pharma", "auto", "metal", "monsoon", "telecom", "power",
+               "defence", "realty", "infra", "ipo"}
 
 
 # ---------------------------------------------------------------- what moves what
@@ -98,12 +126,16 @@ RULES = [
          r"stablecoins?|blockchain|altcoins?|memecoins?|spot etf", "the crypto market (BTC, ETH, altcoins)",
          "Crypto prices react quickly to regulation, ETF flows, exchange news and global risk appetite.", 2, (),
          ("BTC", "ETH")),
+    Rule("forex", r"\bforex\b|currenc(y|ies)|\beur/usd\b|\beuro\b|\byen\b|\byuan\b|sterling|\bpound\b|"
+         r"usd/inr|exchange rate", "currency pairs (USDINR, EURUSD, USDJPY) and exporters/importers",
+         "Currency moves change the value of imports, exports and foreign money flows, and trade directly as "
+         "forex pairs.", 2, ("TCS", "INFY")),
     Rule("rupee", r"\brupee\b|\binr\b|dollar index|\bdxy\b|forex reserves", "IT and pharma exporters (TCS, Infosys, "
          "Sun Pharma) vs importers (oil, electronics)", "A weaker rupee lifts exporters' earnings in rupee terms and "
          "makes imports such as oil costlier; a stronger rupee does the opposite.", 2,
          ("TCS", "INFY", "SUNPHARMA")),
     Rule("flows", r"\bfiis?\b|\bfpis?\b|foreign investors?|foreign portfolio|\bdiis?\b|institutional investors?|"
-         r"fund flows?|outflows?|inflows?", "NIFTY and BANKNIFTY direction (large-cap flows)",
+         r"(equity|mutual fund|sip|fund) (in|out)flows?|fund flows?", "NIFTY and BANKNIFTY direction (large-cap flows)",
          "Large fund flows move big stocks and the indices, so steady buying or selling shows up in NIFTY.", 2),
     Rule("gold", r"\bgold\b|\bsilver\b|bullion", "gold-linked stocks (Titan, Muthoot Finance) and gold ETFs",
          "Gold and silver prices move jewellers and gold-loan companies; a gold rally often signals investors "
@@ -197,6 +229,8 @@ class Item:
     stocks: list = field(default_factory=list)    # NSE symbols mentioned
     coins: list = field(default_factory=list)     # crypto mentioned
     score: float = 0.0
+    cats: list = field(default_factory=list)      # tabs this story belongs to
+    tone: int = 0                                 # +1 good news, -1 bad news, 0 neutral (headline words)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -271,6 +305,65 @@ def fetch_feed(url: str, source: str, cat: str) -> list[Item]:
         return []
 
 
+# ---------------------------------------------------------------- tone (good / bad news), rule-based
+
+POSITIVE = re.compile(
+    r"\b(surg\w*|soar\w*|jump\w*|rall(y|ies|ied)|gain\w*|rise[sn]?|rising|climb\w*|record high|all-time high|"
+    r"lifetime high|beat[s]?|upgrade[sd]?|boost\w*|strong|robust|bullish|rebound\w*|recover\w*|inflows?|"
+    r"rate cut[s]?|cuts? rates?|eases?|easing|cools?|ceasefire|peace|deal|approv\w*|wins?|bags?|order win|"
+    r"outperform\w*|buy rating|expan\w*|profit (rises|jumps|up|grows)|higher dividend|bonus|stimulus|"
+    r"upbeat|optimis\w*|green)\b", re.I)
+NEGATIVE = re.compile(
+    r"\b(fall[s]?|fell|drop\w*|plung\w*|slump\w*|crash\w*|tumbl\w*|slid(e|es)?|sink\w*|sank|declin\w*|"
+    r"loss(es)?|miss(es|ed)?|downgrade[sd]?|weak\w*|probe|raid\w*|ban[s]?|banned|penalt\w*|fine[sd]?|fraud|"
+    r"default\w*|war|attack\w*|strikes?|sanction\w*|tariff hike|outflows?|bearish|sell-?off|rate hike[s]?|"
+    r"hikes? rates?|recession|layoffs?|warn\w*|halt\w*|resign\w*|tension\w*|crisis|risk-off|slowdown|"
+    r"pressure|fear\w*|panic|volatil\w*|red|lower|below|cuts? (forecast|guidance|outlook))\b", re.I)
+# phrases where a "negative" word is good news (and the reverse)
+GOOD_PHRASES = re.compile(r"inflation (eases|cools|falls|drops|slows)|yields? (fall|drop|ease)|crude (falls|drops|slips)"
+                          r"|oil (falls|drops|slips)|losses narrow|loss narrows|debt (falls|cut)", re.I)
+BAD_PHRASES = re.compile(r"inflation (rises|jumps|surges|accelerates)|crude (jumps|surges|soars)|oil (jumps|surges|soars)"
+                         r"|yields? (rise|jump|surge)|profit (falls|drops|declines)", re.I)
+
+
+def tone_of(text: str) -> int:
+    pos, neg = len(POSITIVE.findall(text)), len(NEGATIVE.findall(text))
+    pos += 2 * len(GOOD_PHRASES.findall(text))
+    neg += 2 * len(BAD_PHRASES.findall(text))
+    return 1 if pos > neg else -1 if neg > pos else 0
+
+
+TONE_ICON = {1: "🟢", -1: "🔴", 0: "⚪"}
+ASSET_WORDS = re.compile(
+    r"\b(nifty( 50| bank| it)?|bank ?nifty|sensex|india vix|rbi|sebi|rupee|dollar|gold|silver|crude( oil)?|brent|"
+    r"wti|opec\+?|natural gas|copper|bitcoin|ether(eum)?|solana|xrp|crypto\w*|fed|federal reserve|"
+    r"usd/inr|eur/usd|yen|euro|yuan|bonds?|treasur(y|ies)|wall street|nasdaq|s&p 500|dow)\b", re.I)
+
+
+def bold_title(it: "Item") -> str:
+    """Headline as HTML with the names of related assets (companies, coins, indices, commodities) in bold."""
+    spans = []
+    for _, _, rx in _COMPANY_RX:
+        spans += [m.span() for m in rx.finditer(it.title)]
+    for _, rx in _CRYPTO_RX:
+        spans += [m.span() for m in rx.finditer(it.title)]
+    spans += [m.span() for m in ASSET_WORDS.finditer(it.title)]
+    spans.sort(key=lambda sp: (sp[0], -(sp[1] - sp[0])))
+    merged = []
+    for a, b in spans:
+        if merged and a < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    out, pos = [], 0
+    for a, b in merged:
+        out.append(html.escape(it.title[pos:a]))
+        out.append(f"<b>{html.escape(it.title[a:b])}</b>")
+        pos = b
+    out.append(html.escape(it.title[pos:]))
+    return "".join(out)
+
+
 # ---------------------------------------------------------------- linking + ranking
 
 def tag(item: Item) -> Item:
@@ -286,6 +379,16 @@ def tag(item: Item) -> Item:
                 seen.append(sym)
     item.stocks = seen[:3]
     item.coins = list(dict.fromkeys(sym for sym, rx in _CRYPTO_RX if rx.search(item.title)))[:3]
+    cats = {CAT_ALIASES.get(item.cat, item.cat)}
+    rules = set(item.rules)
+    if rules & FOREX_RULES:
+        cats.add("forex")
+    if "crypto" in rules or item.coins:
+        cats.add("crypto")
+    if item.stocks or rules & INDIA_RULES:
+        cats.add("india")
+    item.cats = sorted(cats)
+    item.tone = tone_of(f"{item.title} {item.summary[:200]}")
     return item
 
 
@@ -309,7 +412,8 @@ def link_sentence(item: Item, themes: int = 1) -> str:
     return "; ".join(parts)
 
 
-def rank(items: list[Item], now: float | None = None, max_age_h: float = MAX_AGE_H) -> list[Item]:
+def rank(items: list[Item], now: float | None = None, max_age_h: float = MAX_AGE_H,
+         require_angle: bool = True) -> list[Item]:
     now = now or time.time()
     kept = []
     for it in items:
@@ -318,8 +422,8 @@ def rank(items: list[Item], now: float | None = None, max_age_h: float = MAX_AGE
         if age_h is not None and age_h > max_age_h:
             continue
         rs = rules_of(it)
-        if it.cat == "world" and not rs and not it.stocks:
-            continue  # general world news with no market angle
+        if require_angle and not rs and not it.stocks and not it.coins and it.cat != "crypto":
+            continue  # no market angle (celebrity, lifestyle, local politics...)
         recency = 0 if age_h is None else (3 if age_h <= 3 else 2 if age_h <= 8 else 1 if age_h <= 24 else 0)
         it.score = (rs[0].weight * 2 if rs else 0) + len(rs) + 2 * bool(it.stocks) + recency
         kept.append(it)
@@ -331,7 +435,9 @@ def rank(items: list[Item], now: float | None = None, max_age_h: float = MAX_AGE
             continue
         sigs.append(words)
         out.append(it)
-    return out[:MAX_ITEMS]
+    out = out[:MAX_ITEMS]
+    out.sort(key=lambda i: i.ts or 0, reverse=True)   # very recent news first
+    return out
 
 
 def collect(cat: str = "all", query: str | None = None) -> list[Item]:
@@ -339,18 +445,24 @@ def collect(cat: str = "all", query: str | None = None) -> list[Item]:
     if query:
         q = query.upper()
         items = fetch_feed(google_news(f"\"{q}\" (share OR stock OR results OR NSE) when:7d"), "Google News", "india")
-        ranked = rank(items, max_age_h=7 * 24)
+        ranked = rank(items, max_age_h=7 * 24, require_angle=False)   # the search itself is the angle
         for it in ranked:
             if q not in it.stocks:
                 it.stocks = [q] + it.stocks[:2]
         return ranked
-    cats = list(FEEDS) if cat == "all" else [cat]
+    cat = CAT_ALIASES.get(cat, cat)
+    # every tab reads every feed, then keeps the stories that belong to it (a Moneycontrol story about
+    # bitcoin shows under Crypto, a CoinDesk story about the rupee under Forex)
+    cats = [c for c in FEEDS if c != "world"]
     jobs = [(url, source, c) for c in cats for source, url in FEEDS.get(c, [])]
     items: list[Item] = []
-    with ThreadPoolExecutor(max_workers=8) as pool:   # one slow site must not delay the reply
+    with ThreadPoolExecutor(max_workers=10) as pool:   # one slow site must not delay the reply
         for got in pool.map(lambda j: fetch_feed(*j), jobs):
             items += got
-    return rank(items)
+    ranked = rank(items)
+    if cat != "all":
+        ranked = [i for i in ranked if cat in (i.cats or [i.cat])]
+    return ranked
 
 
 # ---------------------------------------------------------------- messages
@@ -374,23 +486,29 @@ def page_text(items: list[Item], page: int, cat: str, title: str | None = None) 
     total = pages(items)
     page = min(max(page, 1), total)
     start = (page - 1) * PAGE
-    head = title or f"📰 <b>MARKET NEWS</b> · {CATEGORIES.get(cat, cat)}"
+    head = title or f"📰 <b>MARKET NEWS</b> · {CATEGORIES.get(CAT_ALIASES.get(cat, cat), cat)}"
     now = datetime.now(IST).strftime("%d %b, %H:%M IST")
-    lines = [f"{head} · page {page}/{total}", f"<i>{now} · {len(items)} stories, most market-moving first</i>", LINE]
+    newest = _ago(max((i.ts or 0) for i in items)) if items and any(i.ts for i in items) else ""
+    good, bad = sum(i.tone > 0 for i in items), sum(i.tone < 0 for i in items)
+    lines = [f"{head} · page {page}/{total}",
+             f"<i>⏱ updated {now}" + (f" · newest story {newest}" if newest else "") + "</i>",
+             f"<i>{len(items)} market-moving stories, newest first · 🟢 {good} good · 🔴 {bad} bad</i>", LINE]
     if not items:
         lines.append("No fresh stories could be loaded right now. Try 🔄 Refresh in a few minutes.")
     for n, it in enumerate(items[start:start + PAGE], start + 1):
-        ago = _ago(it.ts)
-        lines.append(f"<b>{n}.</b> {html.escape(it.title[:140])} — <i>links to {html.escape(link_sentence(it))}</i>"
-                     + (f" <code>{ago}</code>" if ago else ""))
-    lines += [LINE, "👇 Tap a number (or send it, e.g. <code>3</code>) for the full story and why it matters."]
+        ago = _ago(it.ts) or "time n/a"
+        lines.append(f"<b>{n}.</b> {TONE_ICON[it.tone]} <code>⏱ {ago}</code> {bold_title(Item(**{**it.to_dict(), 'title': it.title[:150]}))}"
+                     f"\n    ↳ <i>links to {html.escape(link_sentence(it))}</i>")
+    lines += [LINE, "🟢 good news · 🔴 bad news · ⚪ neutral (headline tone, not a prediction)",
+              "👇 Tap a number (or send it, e.g. <code>3</code>) for the full story and why it matters."]
     return "\n".join(lines)
 
 
 def detail_text(it: Item, n: int, total: int, extra_summary: str = "", ai_take: str | None = None) -> str:
     when = datetime.fromtimestamp(it.ts, IST).strftime("%d %b %H:%M IST") if it.ts else "time unknown"
-    lines = [f"📰 <b>STORY {n} of {total}</b>", f"<b>{html.escape(it.title)}</b>",
-             f"🗞 {html.escape(it.source)} · {_ago(it.ts) or ''} ({when})", LINE]
+    tone = {1: "🟢 good news", -1: "🔴 bad news", 0: "⚪ neutral"}[it.tone]
+    lines = [f"📰 <b>STORY {n} of {total}</b> · {tone}", f"⏱ <b>{_ago(it.ts) or 'time unknown'}</b> ({when})",
+             bold_title(it), f"🗞 {html.escape(it.source)}", LINE]
     summary = it.summary if len(it.summary) >= len(extra_summary) else extra_summary
     lines += ["📝 <b>What happened</b>", html.escape(summary) if summary else
               "The feed gave only the headline — tap 🔗 Read full article for details."]

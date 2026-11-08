@@ -1,7 +1,14 @@
 """Fundamental analysis of an NSE stock from Yahoo Finance (via yfinance; free, unofficial).
 
-Yahoo's data can be late or incomplete for Indian stocks, so every figure is optional and the
-message says where it came from. Notes on Yahoo's units:
+Two messages:
+  brief    - the key ratios, each marked 🟢 good / 🟡 average / 🔴 weak, the verdict, then a button for
+  detailed - every ratio Tickertape / Screener show (valuation, profitability incl. ROCE, growth incl.
+             3-year CAGR, balance sheet incl. interest cover and quick ratio, cash flow quality, holdings,
+             price vs moving averages, analyst view), quarterly and yearly tables, strengths & weaknesses.
+Tickertape and Screener have no free public API, so the ratios are computed here from Yahoo's statements
+and the message links to both sites for checking.
+
+Yahoo's data can be late or incomplete for Indian stocks, so every figure is optional. Units:
 - debtToEquity is a percentage (35 means a ratio of 0.35)
 - margins, growth, ROE and holdings are fractions (0.12 = 12%)
 - dividendYield changed units in 2025, so the yield is computed as dividendRate / price instead
@@ -11,6 +18,7 @@ from __future__ import annotations
 import html
 import logging
 from dataclasses import dataclass, field
+from urllib.parse import quote_plus
 
 import pandas as pd
 
@@ -18,7 +26,8 @@ from bot.data import DataError
 
 log = logging.getLogger(__name__)
 LINE = "━━━━━━━━━━━━━━━━━━"
-FINANCIAL_SECTORS = ("financial", "bank")
+FINANCIAL_SECTORS = ("financial", "bank", "insurance", "capital markets", "credit services")
+GOOD, MID, BAD = "🟢", "🟡", "🔴"
 
 
 @dataclass
@@ -26,11 +35,16 @@ class Fundamentals:
     symbol: str
     info: dict
     quarters: pd.DataFrame | None = None     # rows: revenue, net_income; columns: quarter end dates
+    years: pd.DataFrame | None = None        # rows: revenue, net_income, ebit, ...; columns: year ends
     checks: list = field(default_factory=list)  # (status "✅"/"⚠️"/"❌", label, explanation)
+    extra: dict = field(default_factory=dict)   # ratios computed from the statements
 
     def get(self, *keys):
         for k in keys:
             v = self.info.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and not pd.isna(v):
+                return float(v)
+            v = self.extra.get(k)
             if isinstance(v, (int, float)) and not pd.isna(v):
                 return float(v)
         return None
@@ -78,25 +92,94 @@ def fetch(symbol: str) -> Fundamentals:
         f.quarters = quarterly(t.quarterly_income_stmt)
     except Exception as exc:  # quarterly results are a bonus
         log.info("Quarterly results %s unavailable: %s", sym, exc.__class__.__name__)
+    try:
+        f.years = yearly(t.income_stmt, t.balance_sheet, t.cashflow)
+    except Exception as exc:
+        log.info("Annual statements %s unavailable: %s", sym, exc.__class__.__name__)
+    f.extra = derived(f)
     f.checks = score(f)
     return f
 
 
-def quarterly(stmt: pd.DataFrame | None) -> pd.DataFrame | None:
+def _row(stmt: pd.DataFrame | None, *names) -> pd.Series | None:
     if stmt is None or not isinstance(stmt, pd.DataFrame) or stmt.empty:
         return None
+    for n in names:
+        if n in stmt.index:
+            return pd.to_numeric(stmt.loc[n], errors="coerce")
+    return None
+
+
+def quarterly(stmt: pd.DataFrame | None) -> pd.DataFrame | None:
     rows = {}
     for key, names in (("revenue", ["Total Revenue", "Operating Revenue"]),
                        ("net_income", ["Net Income", "Net Income Common Stockholders"])):
-        for n in names:
-            if n in stmt.index:
-                rows[key] = pd.to_numeric(stmt.loc[n], errors="coerce")
-                break
+        r = _row(stmt, *names)
+        if r is not None:
+            rows[key] = r
     if not rows:
         return None
     q = pd.DataFrame(rows).T
-    q = q[sorted(q.columns)[-5:]]  # oldest -> newest, up to 5 quarters (for year-on-year)
-    return q
+    return q[sorted(q.columns)[-5:]]  # oldest -> newest, up to 5 quarters (for year-on-year)
+
+
+def yearly(inc, bal, cf) -> pd.DataFrame | None:
+    spec = {
+        "revenue": (inc, ["Total Revenue", "Operating Revenue"]),
+        "net_income": (inc, ["Net Income", "Net Income Common Stockholders"]),
+        "ebit": (inc, ["EBIT", "Operating Income"]),
+        "interest": (inc, ["Interest Expense", "Interest Expense Non Operating"]),
+        "total_assets": (bal, ["Total Assets"]),
+        "current_liab": (bal, ["Current Liabilities", "Total Current Liabilities"]),
+        "equity": (bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"]),
+        "ocf": (cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"]),
+        "capex": (cf, ["Capital Expenditure"]),
+    }
+    rows = {k: r for k, (st, names) in spec.items() if (r := _row(st, *names)) is not None}
+    if not rows:
+        return None
+    y = pd.DataFrame(rows).T
+    return y[sorted(y.columns)[-4:]]
+
+
+def _last(y: pd.DataFrame | None, key: str):
+    if y is None or key not in y.index:
+        return None
+    s = y.loc[key].dropna()
+    return float(s.iloc[-1]) if len(s) else None
+
+
+def _cagr(y: pd.DataFrame | None, key: str):
+    if y is None or key not in y.index:
+        return None
+    s = y.loc[key].dropna()
+    if len(s) < 3 or s.iloc[0] <= 0 or s.iloc[-1] <= 0:
+        return None
+    n = len(s) - 1
+    return (s.iloc[-1] / s.iloc[0]) ** (1 / n) - 1
+
+
+def derived(f: Fundamentals) -> dict:
+    y = f.years
+    out = {}
+    ebit, ta, cl = _last(y, "ebit"), _last(y, "total_assets"), _last(y, "current_liab")
+    if ebit is not None and ta and cl is not None and ta - cl > 0:
+        out["roce"] = ebit / (ta - cl)
+    intr = _last(y, "interest")
+    if ebit is not None and intr:
+        out["interest_cover"] = ebit / abs(intr)
+    ocf, ni = _last(y, "ocf"), _last(y, "net_income")
+    if ocf is not None and ni and ni > 0:
+        out["cash_conversion"] = ocf / ni
+    out["rev_cagr"] = _cagr(y, "revenue")
+    out["profit_cagr"] = _cagr(y, "net_income")
+    pe = f.info.get("trailingPE")
+    if isinstance(pe, (int, float)) and pe > 0:
+        out["earnings_yield"] = 1 / pe
+    fcf, rev = f.info.get("freeCashflow"), f.info.get("totalRevenue")
+    if isinstance(fcf, (int, float)) and isinstance(rev, (int, float)) and rev:
+        out["fcf_margin"] = fcf / rev
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def _pct(v):
@@ -113,7 +196,17 @@ def _cr(v):
     return f"₹{cr:,.0f} Cr"
 
 
+def grade(v, good, ok, higher_better=True):
+    """🟢 / 🟡 / 🔴 for a value against thresholds."""
+    if v is None:
+        return None
+    if higher_better:
+        return GOOD if v >= good else MID if v >= ok else BAD
+    return GOOD if v <= good else MID if v <= ok else BAD
+
+
 def score(f: Fundamentals) -> list:
+    """The 8-point health check (kept from the first version; also used for the verdict)."""
     out = []
 
     def add(ok, warn, label, why):
@@ -157,65 +250,227 @@ def verdict(f: Fundamentals) -> str:
     bad = sum(c[0] == "❌" for c in f.checks)
     n = len(f.checks)
     tone = "Strong" if good >= 0.7 * n and bad == 0 else ("Weak" if bad >= n / 2 else "Mixed")
-    return f"{tone} fundamentals — {good} of {n} checks pass"
+    icon = GOOD if tone == "Strong" else BAD if tone == "Weak" else MID
+    return f"{icon} {tone} fundamentals — {good} of {n} checks pass"
+
+
+# ---------------------------------------------------------------- ratio rows (label, value text, emoji, why)
+
+def ratios(f: Fundamentals) -> dict[str, list[tuple[str, str, str | None, str]]]:
+    g, fin = f.get, f.is_financial
+    pe, pb = g("trailingPE"), g("priceToBook")
+    sec: dict[str, list] = {}
+
+    def put(section, label, val, emoji, why=""):
+        if val is not None:
+            sec.setdefault(section, []).append((label, val, emoji, why))
+
+    # valuation
+    put("📊 VALUATION", "P/E", f"{pe:.1f}" if pe else None, grade(pe, 25, 45, False) if pe and pe > 0 else BAD,
+        "price per ₹1 of profit (lower = cheaper)")
+    fpe = g("forwardPE")
+    put("📊 VALUATION", "Forward P/E", f"{fpe:.1f}" if fpe else None,
+        (GOOD if pe and fpe < pe else MID) if fpe and fpe > 0 else None, "on next year's expected profit")
+    peg = g("trailingPegRatio", "pegRatio")
+    put("📊 VALUATION", "PEG", f"{peg:.2f}" if peg else None, grade(peg, 1.0, 2.0, False) if peg and peg > 0 else None,
+        "P/E ÷ growth; below 1 = growth at a fair price")
+    put("📊 VALUATION", "P/B", f"{pb:.2f}" if pb else None, grade(pb, 3, 8, False) if pb else None,
+        "price vs book value")
+    ps = g("priceToSalesTrailing12Months")
+    put("📊 VALUATION", "P/S", f"{ps:.2f}" if ps else None, grade(ps, 3, 8, False) if ps else None, "price vs sales")
+    ev = g("enterpriseToEbitda")
+    if not fin:
+        put("📊 VALUATION", "EV/EBITDA", f"{ev:.1f}" if ev else None, grade(ev, 15, 30, False) if ev and ev > 0 else None,
+            "whole-company value vs operating profit")
+    ey = g("earnings_yield")
+    put("📊 VALUATION", "Earnings yield", _pct(ey) if ey else None, grade(ey, 0.05, 0.025) if ey else None,
+        "profit ÷ price (compare with ~7% bond yields)")
+    dy = f.dividend_yield_pct
+    put("📊 VALUATION", "Dividend yield", f"{dy:.2f}%" if dy is not None else None, grade(dy, 1.5, 0.5) if dy is not None
+        else None, "cash paid out ÷ price")
+
+    # profitability
+    roe, roa, roce = g("returnOnEquity"), g("returnOnAssets"), g("roce")
+    put("📈 PROFITABILITY", "ROE", _pct(roe) if roe is not None else None, grade(roe, 0.15, 0.10), "return on shareholders' money")
+    if not fin:
+        put("📈 PROFITABILITY", "ROCE", _pct(roce) if roce is not None else None, grade(roce, 0.15, 0.10),
+            "return on all capital used (debt + equity)")
+    put("📈 PROFITABILITY", "ROA", _pct(roa) if roa is not None else None, grade(roa, 0.07 if not fin else 0.012,
+                                                                             0.03 if not fin else 0.007),
+        "profit on total assets")
+    for key, label, good, ok in (("grossMargins", "Gross margin", 0.40, 0.20), ("ebitdaMargins", "EBITDA margin", 0.20, 0.10),
+                                 ("operatingMargins", "Operating margin", 0.15, 0.08),
+                                 ("profitMargins", "Net margin", 0.10, 0.05)):
+        v = g(key)
+        if fin and key in ("grossMargins", "ebitdaMargins"):
+            continue
+        put("📈 PROFITABILITY", label, _pct(v) if v is not None else None, grade(v, good, ok))
+
+    # growth
+    for key, label in (("revenueGrowth", "Revenue (quarter, YoY)"), ("earningsGrowth", "Profit (quarter, YoY)"),
+                       ("rev_cagr", "Revenue 3-yr CAGR"), ("profit_cagr", "Profit 3-yr CAGR")):
+        v = g(key) if key != "earningsGrowth" else g("earningsGrowth", "earningsQuarterlyGrowth")
+        put("🚀 GROWTH", label, _pct(v) if v is not None else None, grade(v, 0.12, 0.0))
+
+    # balance sheet
+    de = f.debt_to_equity
+    if not fin:
+        put("🏦 BALANCE SHEET", "Debt / equity", f"{de:.2f}" if de is not None else None, grade(de, 0.5, 1.5, False),
+            "borrowing vs own money")
+        cr, qr = g("currentRatio"), g("quickRatio")
+        put("🏦 BALANCE SHEET", "Current ratio", f"{cr:.2f}" if cr else None, grade(cr, 1.5, 1.0) if cr else None,
+            "short-term assets ÷ bills due")
+        put("🏦 BALANCE SHEET", "Quick ratio", f"{qr:.2f}" if qr else None, grade(qr, 1.0, 0.7) if qr else None,
+            "same without inventory")
+        ic = g("interest_cover")
+        put("🏦 BALANCE SHEET", "Interest cover", f"{ic:.1f}×" if ic else None, grade(ic, 5, 2) if ic else None,
+            "operating profit ÷ interest")
+    cash, debt = g("totalCash"), g("totalDebt")
+    if cash is not None and debt is not None and not fin:
+        net = debt - cash
+        put("🏦 BALANCE SHEET", "Net debt", _cr(net), GOOD if net <= 0 else (MID if de is not None and de < 1 else BAD),
+            "debt minus cash (negative = net cash)")
+    elif cash is not None:
+        put("🏦 BALANCE SHEET", "Cash", _cr(cash), None)
+
+    # cash flow
+    if not fin:
+        fcf, fm, conv = g("freeCashflow"), g("fcf_margin"), g("cash_conversion")
+        put("💵 CASH FLOW", "Free cash flow", _cr(fcf) if fcf is not None else None, GOOD if fcf and fcf > 0 else BAD
+            if fcf is not None else None, "cash left after capex")
+        put("💵 CASH FLOW", "FCF margin", _pct(fm) if fm is not None else None, grade(fm, 0.08, 0.0))
+        put("💵 CASH FLOW", "Cash conversion (OCF ÷ profit)", f"{conv:.2f}×" if conv else None,
+            grade(conv, 0.9, 0.6) if conv else None, "profits backed by real cash")
+    payout = g("payoutRatio")
+    put("💵 CASH FLOW", "Dividend payout", _pct(payout) if payout else None,
+        (GOOD if 0.1 <= payout <= 0.7 else MID) if payout else None)
+
+    # ownership + price
+    ins, inst = g("heldPercentInsiders"), g("heldPercentInstitutions")
+    put("👥 HOLDINGS", "Promoters / insiders", _pct(ins) if ins is not None else None, grade(ins, 0.45, 0.25),
+        "skin in the game")
+    put("👥 HOLDINGS", "Institutions (FII + DII)", _pct(inst) if inst is not None else None, grade(inst, 0.25, 0.10))
+    beta = g("beta")
+    put("👥 HOLDINGS", "Beta", f"{beta:.2f}" if beta is not None else None, grade(beta, 1.0, 1.4, False)
+        if beta is not None else None, "1 = moves with the market")
+    price, d50, d200 = f.price, g("fiftyDayAverage"), g("twoHundredDayAverage")
+    if price and d200:
+        put("💹 PRICE", "vs 200-day average", f"{(price / d200 - 1) * 100:+.1f}%", GOOD if price > d200 else BAD,
+            "above = long-term uptrend")
+    if price and d50:
+        put("💹 PRICE", "vs 50-day average", f"{(price / d50 - 1) * 100:+.1f}%", GOOD if price > d50 else BAD)
+    hi, lo = g("fiftyTwoWeekHigh"), g("fiftyTwoWeekLow")
+    if price and hi and lo and hi > lo:
+        pos = (price - lo) / (hi - lo)
+        put("💹 PRICE", "52-week position", f"{pos * 100:.0f}% ({lo:,.0f}–{hi:,.0f})",
+            GOOD if pos >= 0.6 else MID if pos >= 0.3 else BAD)
+    tgt, rec = g("targetMeanPrice"), f.info.get("recommendationKey")
+    if price and tgt:
+        up = tgt / price - 1
+        put("💹 PRICE", "Analyst target (mean)", f"₹{tgt:,.0f} ({up * 100:+.0f}%"
+            + (f", {html.escape(str(rec)).replace('_', ' ')}" if rec else "") + ")", grade(up, 0.10, 0.0))
+    return sec
+
+
+def pros_cons(f: Fundamentals) -> tuple[list[str], list[str]]:
+    pros, cons = [], []
+    for rows in ratios(f).values():
+        for label, val, emoji, _ in rows:
+            if emoji == GOOD:
+                pros.append(f"{label} {val}")
+            elif emoji == BAD:
+                cons.append(f"{label} {val}")
+    return pros, cons
+
+
+def _head(f: Fundamentals, title: str) -> list[str]:
+    i = f.info
+    sector = " · ".join(html.escape(str(x)) for x in (i.get("sector"), i.get("industry")) if x)
+    lines = [f"🏢 <b>{html.escape(f.symbol)} · {title}</b>",
+             f"<i>{html.escape(f.name)}{(' · ' + sector) if sector else ''}</i>", LINE]
+    if f.get("marketCap") is not None:
+        mc = f.get("marketCap")
+        size = "large cap" if mc >= 2e11 else "mid cap" if mc >= 5e10 else "small cap"
+        lines.append(f"💰 Market cap <b>{_cr(mc)}</b> ({size})")
+    if f.price is not None:
+        lines.append(f"💹 Price ₹{f.price:,.2f}")
+    return lines
+
+
+BRIEF_KEYS = ["P/E", "PEG", "P/B", "ROE", "ROCE", "Net margin", "Revenue (quarter, YoY)", "Profit (quarter, YoY)",
+              "Debt / equity", "Free cash flow", "Promoters / insiders", "vs 200-day average"]
+
+
+def brief_text(f: Fundamentals) -> str:
+    """First message: the key ratios with 🟢 / 🔴, the verdict and the top strengths and weaknesses."""
+    lines = _head(f, "FUNDAMENTALS")
+    rows = {lbl: (val, em) for sec in ratios(f).values() for lbl, val, em, _ in sec}
+    lines.append("")
+    for k in BRIEF_KEYS:
+        if k in rows:
+            val, em = rows[k]
+            lines.append(f"{em or '⚪'} {html.escape(k)}: <b>{html.escape(val)}</b>")
+    pros, cons = pros_cons(f)
+    if pros:
+        lines += ["", f"{GOOD} <b>Strengths:</b> " + html.escape(", ".join(pros[:5]))]
+    if cons:
+        lines.append(f"{BAD} <b>Weaknesses:</b> " + html.escape(", ".join(cons[:5])))
+    if f.is_financial:
+        lines.append("ℹ️ Bank/finance company: debt, current ratio and cash flow are not meaningful, so skipped.")
+    lines += ["", f"<b>Verdict:</b> {html.escape(verdict(f))}",
+              "👇 Tap <b>📑 Detailed fundamentals</b> for every ratio, quarterly &amp; yearly results."]
+    lines.append("<i>Source: Yahoo Finance (unofficial, can be late). Not financial advice.</i>")
+    return "\n".join(lines)
+
+
+def detailed_text(f: Fundamentals) -> str:
+    lines = _head(f, "DETAILED FUNDAMENTALS")
+    for title, rows in ratios(f).items():
+        lines += ["", f"<b>{title}</b>"]
+        for label, val, emoji, why in rows:
+            w = f" — <i>{html.escape(why)}</i>" if why else ""
+            lines.append(f"{emoji or '⚪'} {html.escape(label)}: <b>{html.escape(val)}</b>{w}")
+    if f.quarters is not None and f.quarters.shape[1] >= 2:
+        q = f.quarters
+        tbl = [f"{'Quarter':<9}{'Revenue':>12}{'Profit':>11}"]
+        for col in q.columns[-4:]:
+            rev = q.at["revenue", col] if "revenue" in q.index else None
+            ni = q.at["net_income", col] if "net_income" in q.index else None
+            tbl.append(f"{pd.Timestamp(col):%b %Y}".ljust(9)
+                       + f"{_cr(rev) if rev is not None and not pd.isna(rev) else '–':>12}"
+                       + f"{_cr(ni) if ni is not None and not pd.isna(ni) else '–':>11}")
+        lines += ["", "<b>🧾 LAST QUARTERS</b>", "<pre>" + html.escape("\n".join(tbl)) + "</pre>"]
+    if f.years is not None and f.years.shape[1] >= 2:
+        y = f.years
+        tbl = [f"{'Year':<6}{'Revenue':>12}{'Profit':>11}{'OCF':>11}"]
+        for col in y.columns:
+            def cell(k):
+                v = y.at[k, col] if k in y.index else None
+                return _cr(v) if v is not None and not pd.isna(v) else "–"
+            tbl.append(f"{pd.Timestamp(col):%Y}".ljust(6) + f"{cell('revenue'):>12}{cell('net_income'):>11}"
+                       f"{cell('ocf'):>11}")
+        lines += ["", "<b>📅 YEARLY</b>", "<pre>" + html.escape("\n".join(tbl)) + "</pre>"]
+    if f.checks:
+        lines += ["", "<b>✅ HEALTH CHECK</b>"]
+        icon = {"✅": GOOD, "⚠️": MID, "❌": BAD}
+        lines += [f"{icon.get(st, st)} {html.escape(lbl)} — <i>{html.escape(why)}</i>" for st, lbl, why in f.checks]
+        if f.is_financial:
+            lines.append("ℹ️ Bank/finance company: debt, current ratio and cash flow are not meaningful, so skipped.")
+    pros, cons = pros_cons(f)
+    lines += ["", f"{GOOD} <b>STRENGTHS</b>"] + [f"{GOOD} {html.escape(p)}" for p in pros] if pros else []
+    if cons:
+        lines += ["", f"{BAD} <b>WEAKNESSES</b>"] + [f"{BAD} {html.escape(c)}" for c in cons]
+    lines += ["", f"<b>Verdict:</b> {html.escape(verdict(f))}",
+              "<i>Ratios computed from Yahoo Finance statements (Tickertape/Screener style). Cross-check on the "
+              "links below or in the annual report. Not financial advice.</i>"]
+    return "\n".join(lines)
 
 
 def report_text(f: Fundamentals) -> str:
-    i = f.info
-    sector = " · ".join(html.escape(str(x)) for x in (i.get("sector"), i.get("industry")) if x)
-    lines = [f"🏢 <b>{html.escape(f.symbol)} · FUNDAMENTALS</b>",
-             f"<i>{html.escape(f.name)}{(' · ' + sector) if sector else ''}</i>", LINE]
-    price, hi, lo = f.price, f.get("fiftyTwoWeekHigh"), f.get("fiftyTwoWeekLow")
-    if f.get("marketCap") is not None:
-        lines.append(f"💰 Market cap <b>{_cr(f.get('marketCap'))}</b>")
-    if price is not None:
-        rng = ""
-        if hi and lo and hi > lo:
-            rng = f" · 52W {lo:,.2f} – {hi:,.2f} (at {(price - lo) / (hi - lo) * 100:.0f}% of the range)"
-        lines.append(f"💹 Price ₹{price:,.2f}{rng}")
+    """Kept for older callers and tests: the detailed text."""
+    return detailed_text(f)
 
-    def row(title, items):
-        vals = [f"{k} {v}" for k, v in items if v not in (None, "–")]
-        if vals:
-            lines.extend(["", f"<b>{title}</b>", " · ".join(vals)])
 
-    g = f.get
-    row("📊 VALUATION", [("P/E", f"{g('trailingPE'):.1f}" if g("trailingPE") else None),
-                        ("Forward P/E", f"{g('forwardPE'):.1f}" if g("forwardPE") else None),
-                        ("P/B", f"{g('priceToBook'):.2f}" if g("priceToBook") else None),
-                        ("EPS", f"₹{g('trailingEps'):,.2f}" if g("trailingEps") is not None else None),
-                        ("Book value", f"₹{g('bookValue'):,.2f}" if g("bookValue") else None)])
-    row("📈 PROFITABILITY", [("ROE", _pct(g("returnOnEquity"))), ("ROA", _pct(g("returnOnAssets"))),
-                            ("Operating margin", _pct(g("operatingMargins"))),
-                            ("Net margin", _pct(g("profitMargins")))])
-    row("🚀 GROWTH (vs last year's quarter)", [("Revenue", _pct(g("revenueGrowth"))),
-                                              ("Earnings", _pct(g("earningsGrowth", "earningsQuarterlyGrowth")))])
-    row("🏦 BALANCE SHEET", [("Debt/Equity", f"{f.debt_to_equity:.2f}" if f.debt_to_equity is not None else None),
-                            ("Current ratio", f"{g('currentRatio'):.2f}" if g("currentRatio") else None),
-                            ("Cash", _cr(g("totalCash")) if g("totalCash") else None),
-                            ("Debt", _cr(g("totalDebt")) if g("totalDebt") else None)])
-    dy = f.dividend_yield_pct
-    row("💵 DIVIDEND", [("Yield", f"{dy:.2f}%" if dy is not None else None),
-                       ("Payout", _pct(g("payoutRatio")) if g("payoutRatio") else None)])
-    row("👥 HOLDINGS (Yahoo)", [("Insiders/promoters", _pct(g("heldPercentInsiders"))),
-                               ("Institutions", _pct(g("heldPercentInstitutions"))),
-                               ("Beta", f"{g('beta'):.2f}" if g("beta") is not None else None)])
-    if f.quarters is not None and f.quarters.shape[1] >= 2:
-        q = f.quarters
-        tbl = [f"{'Quarter':<9}{'Revenue':>12}{'Net profit':>12}"]
-        for col in q.columns[-4:]:
-            rev, ni = q.at["revenue", col] if "revenue" in q.index else None, \
-                q.at["net_income", col] if "net_income" in q.index else None
-            tbl.append(f"{pd.Timestamp(col):%b %Y}".ljust(9)
-                       + f"{_cr(rev) if rev is not None and not pd.isna(rev) else '–':>12}"
-                       + f"{_cr(ni) if ni is not None and not pd.isna(ni) else '–':>12}")
-        lines += ["", "<b>🧾 LAST QUARTERS</b>", "<pre>" + html.escape("\n".join(tbl)) + "</pre>"]
-    if f.checks:
-        lines += ["", "<b>✅ HEALTH CHECK</b>"]
-        lines += [f"{st} {html.escape(lbl)} — <i>{html.escape(why)}</i>" for st, lbl, why in f.checks]
-        if f.is_financial:
-            lines.append("ℹ️ Bank/finance company: debt, current ratio and cash flow are not meaningful, so skipped.")
-        lines += ["", f"<b>Verdict:</b> {html.escape(verdict(f))}"]
-    lines.append("<i>Source: Yahoo Finance (unofficial, can be late or incomplete). Check the annual report or "
-                 "NSE filings before investing. Not financial advice.</i>")
-    return "\n".join(lines)
+def links(sym: str) -> list[tuple[str, str]]:
+    return [("🔗 Screener", f"https://www.screener.in/company/{quote_plus(sym)}/"),
+            ("🔗 Tickertape", f"https://www.google.com/search?q={quote_plus('tickertape ' + sym + ' share')}")]

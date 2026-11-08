@@ -120,7 +120,8 @@ def analyze(x: pd.DataFrame) -> tuple[pd.DataFrame, Snapshot]:
     cols = {k: np.full(n, np.nan) for k in (
         "sup", "sup_touches", "res", "res_touches", "dz_top", "dz_bot", "sz_top", "sz_bot",
         "bz_top", "bz_bot", "bzs_top", "bzs_bot", "tl_down", "tl_down_prev", "tl_up", "tl_up_prev",
-        "struct", "bars_since_bull", "bars_since_bear", "round_cross", "round_cross_down")}
+        "struct", "bars_since_bull", "bars_since_bear", "round_cross", "round_cross_down",
+        "sw_hi", "sw_hi_i", "sw_lo", "sw_lo_i", "sw_hi_prev", "sw_lo_prev", "bull_lvl", "bear_lvl")}
     bz_kind = [""] * n
     bzs_kind = [""] * n
     bull_kind = [""] * n
@@ -135,6 +136,7 @@ def analyze(x: pd.DataFrame) -> tuple[pd.DataFrame, Snapshot]:
     struct, bull_i, bull_k = 0, None, ""
     bear_i, bear_k = None, ""
     used_base: set[int] = set()
+    bull_lvl = bear_lvl = np.nan
 
     for i in range(n):
         a = atr[i] if atr[i] == atr[i] and atr[i] > 0 else max(h[i] - l[i], 1e-12)
@@ -159,6 +161,7 @@ def analyze(x: pd.DataFrame) -> tuple[pd.DataFrame, Snapshot]:
             struct, bull_i, bull_k = 1, i, kind
             last_sh[2] = True
             breaks.append((i, last_sh[1], kind, 1))
+            bull_lvl = last_sh[1]
             for k in range(i - 1, max(i - 15, -1), -1):
                 if c[k] < o[k]:
                     zones.append(Zone("ob_bull", h[k], l[k], k, i))
@@ -168,6 +171,7 @@ def analyze(x: pd.DataFrame) -> tuple[pd.DataFrame, Snapshot]:
             struct, bear_i, bear_k = -1, i, kind
             last_sl[2] = True
             breaks.append((i, last_sl[1], kind, -1))
+            bear_lvl = last_sl[1]
             for k in range(i - 1, max(i - 15, -1), -1):
                 if c[k] > o[k]:
                     zones.append(Zone("ob_bear", h[k], l[k], k, i))
@@ -257,6 +261,15 @@ def analyze(x: pd.DataFrame) -> tuple[pd.DataFrame, Snapshot]:
             cols["tl_up"][i], cols["tl_up_prev"][i] = _line(line, i), _line(line, i - 1)
 
         cols["struct"][i] = struct
+        if swings_h:
+            cols["sw_hi_i"][i], cols["sw_hi"][i] = swings_h[-1]
+            if len(swings_h) >= 2:
+                cols["sw_hi_prev"][i] = swings_h[-2][1]
+        if swings_l:
+            cols["sw_lo_i"][i], cols["sw_lo"][i] = swings_l[-1]
+            if len(swings_l) >= 2:
+                cols["sw_lo_prev"][i] = swings_l[-2][1]
+        cols["bull_lvl"][i], cols["bear_lvl"][i] = bull_lvl, bear_lvl
         if bull_i is not None:
             cols["bars_since_bull"][i] = i - bull_i
             bull_kind[i] = bull_k

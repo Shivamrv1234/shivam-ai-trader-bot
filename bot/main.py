@@ -1,4 +1,4 @@
-"""Entry point used by the GitHub Actions workflows.
+"""Entry point used by the GitHub Actions workflows, Cloud Run and your own PC.
 
     python -m bot.main commands           # answer pending Telegram messages and button taps
     python -m bot.main run "/analyze SOL" # run one command (manual GitHub button)
@@ -8,59 +8,67 @@
     python -m bot.main selftest           # check secrets + data sources, message you
     python -m bot.main webhook set URL    # Cloud Run: Telegram pushes messages to URL (instant replies)
     python -m bot.main webhook delete     # back to GitHub's 5-minute checks
+    python -m bot.main local              # own PC / VM: instant replies + scheduled alerts, runs until stopped
+    python -m bot.main local --no-alerts  # own PC / VM: instant replies only (alerts stay on GitHub)
 """
 from __future__ import annotations
 
 import html
 import logging
 import sys
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
-from bot import ai, angel, chart, data, fno, fundamentals, futures, news, report, state, symbols, telegram
-from bot.config import cfg, gemini_key, gemini_model, telegram_chat_id, telegram_token
+from bot import (ai, angel, chart, data, fno, fundamentals, futures, fx, news, paper, report, state, store,
+                 strategies, symbols, telegram, vol)
+from bot.config import (allowed_chats, allowed_users, cfg, gemini_key, gemini_model, secret, telegram_chat_id,
+                        telegram_token)
 
 log = logging.getLogger("bot")
 
 HOME = ("🏠 Menu", "cmd:/start")
 MENU = [
-    [("🪙 Crypto scan", "cmd:/crypto"), ("📈 NSE stocks scan", "cmd:/stocks")],
+    [("🪙 Crypto", "cmd:/crypto"), ("📈 NSE Stocks", "cmd:/stocks"), ("💱 Forex", "m:fx")],
     [("🔎 Any NSE stock", "m:stock"), ("🏢 Fundamentals", "m:fund")],
-    [("📊 Option chain", "m:fno"), ("📈 Futures", "m:fut")],
-    [("📰 News & geopolitics", "n:c:all"), ("🔥 OI build-up", "bu")],
+    [("📊 Option chain", "m:fno"), ("🧮 Greeks", "m:grk"), ("🧠 F&O Plan", "m:fop")],
+    [("📈 Futures", "m:fut"), ("🔥 OI build-up", "bu"), ("🌡 India VIX", "vix")],
+    [("📰 News", "n:c:all"), ("💼 Paper trades", "pt:l"), ("⚖️ Pairs", "pr")],
     [("📚 Strategies", "cmd:/strategies"), ("⚙️ Settings", "cmd:/settings"), ("❓ Help", "cmd:/help")],
 ]
 
 WELCOME = (
     "🤖 <b>SHIVAM AI TRADER</b>\n"
-    "Crypto · NSE stocks · F&amp;O · Futures · News\n"
+    "Crypto · NSE · F&amp;O · Forex &amp; Commodities · News · Paper trading\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "🪙 <b>Crypto scan</b> / 📈 <b>NSE scan</b> — numbered list of BUY/SELL setups; tap a number\n"
-    "🔎 <b>Any NSE stock</b> — type a symbol or company name\n"
-    "🏢 <b>Fundamentals</b> — valuation, profits, debt, growth\n"
-    "📊 <b>Option chain</b> · 📈 <b>Futures</b> · 🔥 <b>OI build-up</b>\n"
-    "📰 <b>News &amp; geopolitics</b> — 10 stories a page, each linked to the sectors it moves\n\n"
-    "Tip: just send <code>ETH</code>, <code>RELIANCE</code>, <code>NIFTY</code> or <code>tata motors</code>.\n"
+    "🪙 <b>Crypto</b> · 📈 <b>NSE</b> · 💱 <b>Forex</b> — numbered list of BUY/SELL setups; tap a number\n"
+    "⏱ Every chart: ⚡ 5m/15m scalp · ☀️ 30m/1h intraday · 🌊 4h/1D swing\n"
+    "📋 14 strategies with 🟢 BUY / 🔴 SELL lights, live price and India VIX\n"
+    "📊 Option chain · 🧮 Greeks · 🧠 F&amp;O plan (buy / sell / hedge)\n"
+    "🏢 Fundamentals · 📰 News 🟢/🔴 · 💼 Paper trades · ⚖️ Pairs\n\n"
+    "Tip: just send <code>ETH</code>, <code>RELIANCE 15m</code>, <code>XAUUSD</code> or <code>tata motors</code>.\n"
     "<i>For learning and paper trading — not financial advice.</i>"
 )
 
 HELP = (
     "❓ <b>HELP</b>\n━━━━━━━━━━━━━━━━━━\n"
     "<b>Scanners</b>\n"
-    "/crypto · /stocks — numbered list; tap a number or send it (e.g. <code>2</code>)\n\n"
-    "<b>Any NSE stock</b>\n"
-    "/stock TATAMOTORS · /search tata · or just send <code>tata motors</code>\n"
-    "You get: ① chart + trade card ② strategy check ③ full explanation, then buttons for "
-    "📊 Option chain · 📈 Futures · 🏢 Fundamentals · 📰 News\n\n"
-    "<b>Derivatives</b> (needs Angel One)\n"
-    "/fno NIFTY — option chain, PCR, max pain, option trade idea\n"
-    "/futures RELIANCE — all expiries, basis, carry, OI build-up, futures trade plan\n"
-    "/buildup — today's long/short build-up across F&amp;O stocks\n\n"
-    "<b>Company</b>\n/fundamentals INFY — valuation, profitability, debt, growth, quarters\n\n"
-    "<b>News</b>\n/news · /news india · /news world · /news crypto · /news RELIANCE\n"
-    "Each story has a serial number: send the number (e.g. <code>4</code>) for the full story.\n\n"
-    "<b>Automatic alerts</b>\n"
-    "Crypto after every 4h candle · stocks 16:10 IST weekdays · F&amp;O 09:45 &amp; 14:30 IST weekdays\n\n"
-    "⏱ With Google Cloud Run, replies come in seconds. Without it, GitHub checks every 5 minutes."
+    "/crypto · /stocks · /forex — numbered list; tap a number or send it (e.g. <code>2</code>)\n"
+    "Add a timeframe: <code>/crypto 15m</code> · <code>/stocks 1h</code>\n\n"
+    "<b>Any asset</b>\n"
+    "<code>ETH</code> · <code>RELIANCE 5m</code> · <code>EURUSD 1h</code> · <code>GOLD</code> (MCX) · /analyze BTC 4h\n"
+    "You get ① chart + live price + trade card (+ India VIX) ② strategy check (14 strategies, 🟢/🔴), then "
+    "buttons: ⏱ timeframes · 📖 details · 🧭 structure &amp; levels · 📊 volume &amp; order book · 🌡 volatility · "
+    "📝 paper trade · 🔄 re-analyse\n\n"
+    "<b>F&amp;O</b> (Angel One)\n"
+    "/fno NIFTY · /greeks NIFTY · /plan NIFTY · /futures RELIANCE · /buildup · /vix\n\n"
+    "<b>Company</b> /fundamentals INFY (brief, then 📑 detailed)\n"
+    "<b>News</b> /news · /news india · /news forex · /news crypto · /news other · /news RELIANCE\n"
+    "<b>Paper trading</b> /paper · /paper buy ETH · /exit 3 · /history · /board\n"
+    "<b>Pairs</b> /pairs · /pair HDFCBANK ICICIBANK\n\n"
+    "<b>Groups</b> add the bot, then the owner sends /allow in the group. Members use commands "
+    "(<code>/analyze@yourbot ETH</code>) or reply to the bot. /id shows chat and user IDs.\n\n"
+    "<b>Automatic alerts</b> crypto after every 4h candle · stocks 16:10 IST · F&amp;O 09:45 &amp; 14:30 IST"
 )
 
 PROMPTS = {
@@ -71,94 +79,238 @@ PROMPTS = {
     "fno": ("📊 <b>OPTION CHAIN</b>\nChoose an index, or type any F&amp;O stock (e.g. <code>RELIANCE</code>) 👇",
             "fno:"),
     "fut": ("📈 <b>FUTURES</b>\nChoose an index, or type any F&amp;O stock (e.g. <code>SBIN</code>) 👇", "fu:"),
+    "grk": ("🧮 <b>OPTION GREEKS</b>\nChoose an index, or type any F&amp;O stock 👇", "gk:"),
+    "fop": ("🧠 <b>F&amp;O PLAN</b> — option buying, option selling (iron condor / spreads) and hedging from the "
+            "live option chain\nChoose an index, or type any F&amp;O stock 👇", "fp:"),
 }
 INDEX_PICKS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+BACK = {"crypto": "cmd:/crypto", "stock": "cmd:/stocks", "fx": "m:fx"}
 
 
 def _rows(buttons: list, per_row: int = 3) -> list:
     return [buttons[k:k + per_row] for k in range(0, len(buttons), per_row)]
 
 
+def key_of(chat_id: str | None) -> str:
+    """Per-user state key inside groups (so two members' lists don't mix)."""
+    c = telegram.ctx()
+    if c and (chat_id is None or str(chat_id) == c.chat_id):
+        return c.key
+    return str(chat_id or telegram_chat_id())
+
+
+def who() -> tuple[str, str, str]:
+    """(user id, user name, chat id) of whoever this reply is for."""
+    c = telegram.ctx()
+    owner = telegram_chat_id()
+    if c:
+        return c.user_id or c.chat_id, c.user_name or "you", c.chat_id
+    return owner, "you", owner
+
+
+def split_tf(parts: list[str]) -> tuple[list[str], str | None]:
+    """'/analyze ETH 15m' -> (['ETH'], '15m')."""
+    if parts:
+        t = parts[-1].lower()
+        if t in data.TF_SECONDS or t in ("1D".lower(), "d", "60m", "240m", "1hr", "4hr", "5min", "15min", "30min"):
+            return parts[:-1], data.norm_tf(t)
+    return parts, None
+
+
 # ---------------------------------------------------------------- delivering one symbol
 
-def action_buttons(a: report.Analysis) -> list:
-    """Buttons under the explanation: what to look at next for this symbol."""
-    sym = a.symbol
-    rows = []
+def tf_buttons(a: report.Analysis) -> list:
+    out = []
+    for tf in data.TIMEFRAMES:
+        icon = "✅" if tf == a.timeframe else data.TF_MODE[tf].split()[0]
+        out.append((f"{icon} {tf.upper() if tf == '1d' else tf}", f"a:{a.code}:{a.symbol}:{tf}"))
+    return _rows(out, 3)
+
+
+def asset_buttons(a: report.Analysis) -> list:
+    """Buttons under the strategy check: timeframes, details, and the next step for this asset."""
+    sym, cb = a.symbol, a.cb
+    rows = tf_buttons(a)
+    rows.append([("📖 Strategy details", f"d:{cb}"), ("🧭 Structure & levels", f"st:{cb}")])
+    rows.append([("📊 Volume & order book", f"ob:{cb}"), ("🌡 Volatility / VIX", f"vx:{cb}")])
     if a.market == "stock":
         if symbols.has_fno(sym):
-            rows.append([("📊 Option chain", f"fno:{sym}"), ("📈 Futures", f"fu:{sym}")])
+            rows.append([("⛓ Option chain", f"fno:{sym}"), ("🧮 Greeks", f"gk:{sym}"), ("🧠 F&O plan", f"fp:{sym}")])
+            rows.append([("📈 Futures", f"fu:{sym}"), ("🔥 OI build-up", "bu")])
         if a.is_index:
-            rows.append([("📰 Market news", "n:c:india"), ("🔥 OI build-up", "bu")])
+            rows.append([("📰 Market news", "n:c:india"), ("🌡 India VIX", "vix")])
         else:
             rows.append([("🏢 Fundamentals", f"fd:{sym}"), ("📰 News", f"n:q:{sym}")])
-        back = "cmd:/stocks"
-    else:
+    elif a.market == "crypto":
         rows.append([("📰 Crypto news", "n:c:crypto")])
-        back = "cmd:/crypto"
-    code = "c" if a.market == "crypto" else "s"
-    rows.append([("🔄 Refresh", f"a:{code}:{sym}"), ("⬅️ Back to list", back), HOME])
+    else:
+        rows.append([("📰 Forex & commodity news", "n:c:forex")])
+    rows.append([("📝 Paper trade", f"pt:o:{cb}"), ("🔄 Re-analyse", f"a:{cb}")])
+    rows.append([("⬅️ Back to list", BACK[a.market]), HOME])
+    return rows
+
+
+def detail_buttons(a: report.Analysis, here: str) -> list:
+    cb = a.cb
+    opts = [("📖 Strategy details", f"d:{cb}"), ("🧭 Structure & levels", f"st:{cb}"),
+            ("📊 Volume & order book", f"ob:{cb}"), ("🌡 Volatility / VIX", f"vx:{cb}")]
+    rows = _rows([o for o in opts if not o[1].startswith(here + ":")], 2)
+    rows.append([("📝 Paper trade", f"pt:o:{cb}"), ("🔄 Re-analyse", f"a:{cb}"), HOME])
     return rows
 
 
 def deliver(a: report.Analysis, alert: bool = False) -> None:
-    """Three messages: chart + trade card, strategy check, full explanation (+ next-step buttons)."""
+    """Two messages: chart + live trade card, then the strategy check with all the buttons."""
+    if not a.vol_line:
+        try:
+            a.vol_line = vol.card_line(a)
+        except Exception as exc:  # VIX is a bonus, never block the analysis
+            log.info("VIX line skipped: %s", exc)
     best = a.best()
-    title = f"{a.pretty} · {a.timeframe}"
-    png = chart.render(a.x, title, best, a.snap)
+    title = f"{a.pretty} · {a.timeframe} · {data.TF_MODE.get(a.timeframe, '')}"
+    png = chart.render(a.x, title, best, a.snap, live=a.now_price)
     caption = report.card(a)
     if alert:
-        caption = ("🔔 <b>NEW SIGNAL</b>\n" + caption)[:1020]
-    telegram.send_photo(png, caption)
-    telegram.send_text(report.strategy_list(a))
-    summary = ai.summarize(report.facts(a))
-    telegram.send_text(report.explanation(a, summary), buttons=action_buttons(a))
+        caption = "🔔 <b>NEW SIGNAL</b>\n" + caption
+    if len(caption) <= telegram.MAX_CAPTION - 60:
+        telegram.send_photo(png, caption)
+    else:
+        telegram.send_photo(png, caption.split("\n\n")[0])
+        telegram.send_text(caption)
+    telegram.send_text(report.strategy_list(a, alert), buttons=asset_buttons(a))
 
 
-def scan(market: str) -> tuple[list[report.Analysis], list[str]]:
+def deliver_details(market: str, sym: str, tf: str, what: str) -> None:
+    a = report.get(market, sym, tf)
+    if what == "d":
+        summary = ai.summarize(report.facts(a))
+        telegram.send_text(report.details(a, summary), buttons=detail_buttons(a, "d"))
+    elif what == "st":
+        telegram.send_text(report.structure_text(a), buttons=detail_buttons(a, "st"))
+    elif what == "ob":
+        if a.flow is None:
+            a.flow = report.fetch_flow(a, float(a.x["vol_avg20"].iloc[-1]) if a.x["vol_avg20"].notna().any() else None)
+        telegram.send_text(report.flow_text(a), buttons=detail_buttons(a, "ob"))
+    elif what == "vx":
+        parts = []
+        v = vol.india_vix() if a.is_indian else None
+        if v is not None:
+            parts.append(vol.vix_text(v))
+        iv, src = None, ""
+        if a.market == "stock" and symbols.has_fno(a.symbol):
+            try:
+                snap = angel.build_snapshot(angel.session(), a.symbol, 3)
+                from bot import greeks
+                greeks.fill(snap)
+                atm = [l for l in snap.legs if l.strike == snap.atm and l.iv]
+                if atm:
+                    iv, src = sum(l.iv for l in atm) / len(atm), atm[0].greeks_src or "Angel One"
+            except angel.AngelError as exc:
+                log.info("ATM IV %s: %s", a.symbol, exc)
+        parts.append(vol.asset_text(a, iv, src))
+        telegram.send_text("\n\n".join(parts), buttons=detail_buttons(a, "vx"))
+
+
+def analyze_and_deliver(market: str, sym: str, tf: str | None = None) -> None:
+    deliver(report.analyze(sym, market, with_flow=True, tf=tf))
+
+
+def scan(market: str, tf: str | None = None) -> tuple[list[report.Analysis], list[str]]:
     results, errors = [], []
     if market == "crypto":
         universe = data.top_crypto_by_volume(cfg()["crypto"]["top_n_by_volume"])
         items = [(u["symbol"], u.get("change_pct")) for u in universe]
+        mkt = "crypto"
+    elif market == "fx":
+        names = [n for n in fx.watchlist() if fx.find(n) and (angel.configured() or not fx.find(n).indian
+                                                              or fx.find(n).yahoo)]
+        items, mkt = [(n, None) for n in names], "fx"
     else:
         names = list(cfg()["stocks"]["watchlist"])
         if angel.configured():
             names = cfg()["stocks"].get("indices", []) + names
-        items = [(s, None) for s in names]
-    for sym, chg in items:
+        items, mkt = [(s, None) for s in names], "stock"
+    tf = data.norm_tf(tf, report.default_tf(mkt))
+
+    def load(item):
+        sym, _ = item
         try:
-            results.append(report.analyze(sym, "crypto" if market == "crypto" else "stock", change_pct=chg))
+            return item, report.load_candles(sym, mkt, tf, for_scan=True), None
+        except data.DataError as exc:
+            return item, None, exc
+
+    parallel = mkt == "crypto" or (mkt == "fx" and not angel.configured())
+    if parallel:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            loaded = list(pool.map(load, items))
+    else:
+        loaded = [load(i) for i in items]
+    for (sym, chg), candles, err in loaded:
+        if err is not None:
+            log.warning("%s", err)
+            errors.append(sym)
+            continue
+        try:
+            results.append(report.analyze(sym, mkt, candles=candles, change_pct=chg, tf=tf))
         except data.DataError as exc:
             log.warning("%s", exc)
             errors.append(sym)
     return results, errors
 
 
-def cmd_list(market: str, chat_id: str) -> None:
-    results, errors = scan(market)
+def cmd_list(market: str, chat_id: str, tf: str | None = None) -> None:
+    results, errors = scan(market, tf)
+    mkt = {"stocks": "stock"}.get(market, market)
     if not results:
         telegram.send_text(f"⚠️ Could not load any {market} data right now. Try again in a few minutes.\n"
                            + html.escape(", ".join(errors)), buttons=[[HOME]])
         return
     ordered = report.ordered(results)
-    state.remember_list(chat_id, "crypto" if market == "crypto" else "stock", [a.symbol for a in ordered])
+    state.remember_list(key_of(chat_id), mkt, [a.symbol for a in ordered], tf=ordered[0].timeframe)
     buttons = report.list_buttons(results)
-    extra = [("🔎 Any NSE stock", "m:stock"), HOME] if market != "crypto" else [("📰 Crypto news", "n:c:crypto"), HOME]
-    telegram.send_text(report.list_text(results, market, errors), buttons=buttons + [extra])
+    cur = ordered[0].timeframe
+    tfs = [(("✅ " if t == cur else "") + (t.upper() if t == "1d" else t),
+            f"cmd:/{'stocks' if mkt == 'stock' else 'forex' if mkt == 'fx' else 'crypto'} {t}") for t in data.TIMEFRAMES]
+    extra = {"crypto": [("📰 Crypto news", "n:c:crypto"), HOME],
+             "fx": [("💱 Pick an asset", "m:fx"), ("📰 Forex news", "n:c:forex"), HOME]}.get(
+        mkt, [("🔎 Any NSE stock", "m:stock"), HOME])
+    telegram.send_text(report.list_text(results, mkt, errors), buttons=buttons + _rows(tfs, 6) + [extra])
+
+
+# ---------------------------------------------------------------- forex menu
+
+def fx_menu(chat_id: str) -> None:
+    groups = [("💱 Majors &amp; crosses", [a for a in fx.ASSETS.values() if a.kind == "fx"]),
+              ("🥇 Metals · 🛢 Energy · 💵 DXY", [a for a in fx.ASSETS.values() if a.kind in ("metal", "energy", "index")]),
+              ("🇮🇳 Rupee futures (NSE)", [a for a in fx.ASSETS.values() if a.kind == "inr"]),
+              ("🏭 MCX commodities", [a for a in fx.ASSETS.values() if a.kind == "mcx"])]
+    lines = ["💱 <b>FOREX &amp; COMMODITIES</b>", "Tap an asset for its chart, live price and strategy check, or "
+             "📡 scan them all for setups.", ""]
+    lines += fx.source_status()
+    if not angel.configured():
+        lines.append("ℹ️ Rupee futures and MCX need your Angel One login (USDINR &amp; co fall back to Yahoo spot).")
+    rows = [[("📡 Scan all (numbered list)", "cmd:/forex")]]
+    for title, assets in groups:
+        rows.append([(f"— {html.unescape(title)} —", "n:x")])
+        rows += _rows([(f"{a.icon} {a.code}", f"a:f:{a.code}") for a in assets], 4)
+    rows.append([("📰 Forex news", "n:c:forex"), HOME])
+    telegram.send_text("\n".join(lines), buttons=rows)
+    state.set_wait(key_of(chat_id), "fx")
 
 
 # ---------------------------------------------------------------- any NSE stock
 
 def prompt(chat_id: str, mode: str) -> None:
     """Menu button: remember what the next typed text means, and offer quick picks."""
-    state.set_wait(chat_id, mode)
+    key = key_of(chat_id)
+    state.set_wait(key, mode)
     text, prefix = PROMPTS[mode]
     picks = list(cfg()["stocks"]["watchlist"])
-    if mode in ("fno", "fut"):
+    if mode in ("fno", "fut", "grk", "fop"):
         if not angel.configured():
-            telegram.send_text("📊 Option chain and futures need your Angel One SmartAPI secrets "
-                               "(see the Setup Guide, part 5).", buttons=[[HOME]])
-            state.set_wait(chat_id, None)
+            telegram.send_text("📊 Option chain, Greeks, F&amp;O plans and futures need your Angel One SmartAPI "
+                               "secrets (see the Setup Guide, part 5).", buttons=[[HOME]])
+            state.set_wait(key, None)
             return
         picks = INDEX_PICKS + picks[:5]
     rows = _rows([(p, prefix + p) for p in picks])
@@ -168,11 +320,19 @@ def prompt(chat_id: str, mode: str) -> None:
     telegram.send_text(text, buttons=rows)
 
 
-def open_stock(query: str, target: str) -> None:
+def open_stock(query: str, target: str, tf: str | None = None) -> None:
     """Resolve what the user typed to one NSE symbol, then run the target screen."""
+    if target == "fx":
+        a = fx.find(query)
+        if a:
+            analyze_and_deliver("fx", a.code, tf)
+        else:
+            telegram.send_text(f"💱 “{html.escape(query[:30])}” isn't in the forex list. Try EURUSD, XAUUSD, USOIL, "
+                               "USDINR or GOLD.", buttons=[[("💱 Forex menu", "m:fx"), HOME]])
+        return
     sym, matches = symbols.find_stock(query)
     if sym:
-        run_target(target, sym)
+        run_target(target, sym, tf)
     elif matches:
         show_matches(query, matches, target)
     else:
@@ -180,15 +340,19 @@ def open_stock(query: str, target: str) -> None:
                            "e.g. <code>/search tata</code>.", buttons=[[("🔎 Try again", "m:stock"), HOME]])
 
 
-def run_target(target: str, sym: str) -> None:
+def run_target(target: str, sym: str, tf: str | None = None) -> None:
     if target == "fund":
         deliver_fundamentals(sym)
     elif target == "fut":
         deliver_futures(sym)
     elif target == "fno":
         deliver_fno(sym)
+    elif target == "grk":
+        deliver_greeks(sym)
+    elif target == "fop":
+        deliver_plan(sym)
     else:
-        deliver(report.analyze(sym, "stock", with_flow=True))
+        analyze_and_deliver("stock", sym, tf)
 
 
 def show_matches(query: str, matches: list[str], target: str = "stock") -> None:
@@ -209,44 +373,122 @@ def cmd_search(query: str) -> None:
 
 # ---------------------------------------------------------------- fundamentals
 
-def deliver_fundamentals(sym: str) -> None:
+_FUND: dict = {}
+
+
+def _fundamentals(sym: str):
+    hit = _FUND.get(sym)
+    if hit and time.time() - hit[0] < 900:
+        return hit[1]
+    f = fundamentals.fetch(sym)
+    _FUND[sym] = (time.time(), f)
+    return f
+
+
+def deliver_fundamentals(sym: str, detailed: bool = False) -> None:
     sym = sym.upper()
     if sym in angel.INDEX_ALIASES:
         telegram.send_text("🏢 Indices have no company fundamentals. Pick a stock instead.",
                            buttons=[[("🏢 Choose a stock", "m:fund"), HOME]])
         return
-    f = fundamentals.fetch(sym)
-    rows = [[("📈 Technical analysis", f"a:s:{sym}"), ("📰 News", f"n:q:{sym}")]]
+    f = _fundamentals(sym)
+    rows = []
+    if not detailed:
+        rows.append([("📑 Detailed fundamentals", f"fdd:{sym}")])
+    rows.append([("📈 Technical analysis", f"a:s:{sym}"), ("📰 News", f"n:q:{sym}")])
     if symbols.has_fno(sym):
         rows.append([("📊 Option chain", f"fno:{sym}"), ("📈 Futures", f"fu:{sym}")])
+    rows.append(fundamentals.links(sym))
     rows.append([("🔄 Refresh", f"fd:{sym}"), HOME])
-    telegram.send_text(fundamentals.report_text(f), buttons=rows)
+    text = fundamentals.detailed_text(f) if detailed else fundamentals.brief_text(f)
+    telegram.send_text(text, buttons=rows)
 
 
-# ---------------------------------------------------------------- F&O and futures
+# ---------------------------------------------------------------- F&O, Greeks, plan, futures
 
 NEED_ANGEL = "📊 F&amp;O and futures need your Angel One SmartAPI secrets (see the Setup Guide, part 5)."
 
 
-def deliver_fno(name: str) -> None:
+def _snapshot(name: str, strikes: int | None = None):
     if not angel.configured():
         telegram.send_text(NEED_ANGEL, buttons=[[HOME]])
-        return
+        return None
     try:
-        snap = angel.build_snapshot(angel.session(), name, cfg()["fno"]["strikes_each_side"])
+        return angel.build_snapshot(angel.session(), name, strikes or cfg()["fno"]["strikes_each_side"])
     except angel.AngelError as exc:
         telegram.send_text(f"⚠️ F&amp;O data problem: {html.escape(str(exc))}", buttons=[[HOME]])
+        return None
+
+
+def fno_buttons(name: str, here: str) -> list:
+    opts = [("⛓ Option chain", f"fno:{name}"), ("🧮 Greeks", f"gk:{name}"), ("🧠 F&O plan", f"fp:{name}"),
+            ("📈 Futures", f"fu:{name}"), ("📉 Chart analysis", f"a:s:{name}"), ("🌡 India VIX", "vix")]
+    rows = _rows([o for o in opts if not o[1].startswith(here)], 3)
+    rows.append([("🔄 Refresh", f"{here}{name}"), HOME])
+    return rows
+
+
+def deliver_fno(name: str) -> None:
+    snap = _snapshot(name)
+    if snap is None:
         return
+    from bot import greeks
+    greeks.fill(snap)
     telegram.send_photo(fno.oi_chart(snap), f"📊 <b>{html.escape(snap.name)} · F&amp;O</b>\n"
                                             f"Spot {snap.spot:,.2f} · PCR {snap.pcr} · expiry {snap.expiry:%d %b}")
     text = fno.summary_text(snap)
     try:
-        a = report.analyze(snap.name, "stock")
+        a = report.analyze(snap.name, "stock", tf="1d")
         text += "\n\n" + fno.option_idea(snap, a)
     except data.DataError as exc:
         text += f"\n\n(Option idea unavailable: {html.escape(str(exc))})"
-    telegram.send_text(text, buttons=[[("📈 Futures", f"fu:{snap.name}"), ("📉 Chart analysis", f"a:s:{snap.name}")],
-                                      [("🔄 Refresh", f"fno:{snap.name}"), HOME]])
+    telegram.send_text(text, buttons=fno_buttons(snap.name, "fno:"))
+
+
+def deliver_greeks(name: str) -> None:
+    snap = _snapshot(name)
+    if snap is None:
+        return
+    from bot import greeks
+    greeks.fill(snap)
+    png = greeks.chart(snap)
+    if png:
+        telegram.send_photo(png, f"🧮 <b>{html.escape(snap.name)} · Greeks by strike</b> · expiry {snap.expiry:%d %b}")
+    telegram.send_text(greeks.report_text(snap), buttons=fno_buttons(snap.name, "gk:"))
+
+
+PLAN_LABEL = {"buy": "⚡ Option buying", "credit": "💰 Credit spread", "condor": "🦅 Iron condor",
+              "hedge": "🛡 Hedging"}
+
+
+def deliver_plan(name: str, which: str = "auto") -> None:
+    snap = _snapshot(name)
+    if snap is None:
+        return
+    from bot import fno_plan
+    try:
+        a = report.analyze(snap.name, "stock", tf="1d")
+    except data.DataError:
+        a = None
+    rec, alts = fno_plan.recommend(snap, a)
+    if which == "auto":
+        plan, recommended = rec, True
+    else:
+        vv = fno_plan.vol_view(snap, a)
+        side = a.best().side if a is not None and a.best() else ("BUY" if (snap.pcr or 1) >= 1 else "SELL")
+        plan = {"buy": lambda: fno_plan.plan_buy(snap, a, vv),
+                "credit": lambda: fno_plan.plan_credit(snap, a, vv, side),
+                "condor": lambda: fno_plan.plan_condor(snap, vv, a),
+                "hedge": lambda: fno_plan.plan_hedge(snap, a, vv)}.get(which, lambda: rec)()
+        recommended = plan.key == rec.key
+    png = fno_plan.payoff_chart(plan, snap)
+    if png:
+        telegram.send_photo(png, f"🧠 <b>{html.escape(snap.name)} · F&amp;O plan</b> · payoff per lot at expiry")
+    rows = [[(("✅ " if plan.key == k else "") + lbl, f"fp:{snap.name}:{k}") for k, lbl in list(PLAN_LABEL.items())[:2]],
+            [(("✅ " if plan.key == k else "") + lbl, f"fp:{snap.name}:{k}") for k, lbl in list(PLAN_LABEL.items())[2:]],
+            [("⭐ Recommended", f"fp:{snap.name}"), ("⛓ Option chain", f"fno:{snap.name}"), ("🧮 Greeks", f"gk:{snap.name}")],
+            [("🔄 Refresh", f"fp:{snap.name}:{which}"), HOME]]
+    telegram.send_text(fno_plan.plan_text(plan, snap, recommended), buttons=rows)
 
 
 def deliver_futures(name: str) -> None:
@@ -265,10 +507,11 @@ def deliver_futures(name: str) -> None:
                                  f"{near.ltp:,.2f} ({near.change_pct:+.2f}%) · spot {rep.spot:,.2f}")
     text = futures.report_text(rep)
     try:
-        text += "\n\n" + futures.trade_plan(rep, report.analyze(rep.name, "stock"))
+        text += "\n\n" + futures.trade_plan(rep, report.analyze(rep.name, "stock", tf="1d"))
     except data.DataError as exc:
         text += f"\n\n(Trade plan unavailable: {html.escape(str(exc))})"
-    telegram.send_text(text, buttons=[[("📊 Option chain", f"fno:{rep.name}"), ("📉 Chart analysis", f"a:s:{rep.name}")],
+    telegram.send_text(text, buttons=[[("📊 Option chain", f"fno:{rep.name}"), ("🧠 F&O plan", f"fp:{rep.name}"),
+                                       ("📉 Chart analysis", f"a:s:{rep.name}")],
                                       [("🔄 Refresh", f"fu:{rep.name}"), ("🔥 OI build-up", "bu"), HOME]])
 
 
@@ -281,6 +524,146 @@ def cmd_buildup() -> None:
     names = futures.buildup_symbols(lists, sess.inst)[:9]
     rows = _rows([(f"📈 {n}", f"fu:{n}") for n in names]) + [[("🔄 Refresh", "bu"), HOME]]
     telegram.send_text(futures.buildup_text(lists), buttons=rows)
+
+
+def cmd_vix() -> None:
+    v = vol.india_vix()
+    if v is None:
+        telegram.send_text("🌡 India VIX is unavailable right now (Angel One and Yahoo both failed). Try again soon.",
+                           buttons=[[HOME]])
+        return
+    telegram.send_photo(vol.chart(v), f"🌡 <b>India VIX {v.value:.2f}</b> · {v.icon} {v.label}")
+    telegram.send_text(vol.vix_text(v), buttons=[[("📈 NIFTY chart", "a:s:NIFTY"), ("🧠 NIFTY F&O plan", "fp:NIFTY")],
+                                                 [("🔄 Refresh", "vix"), HOME]])
+
+
+# ---------------------------------------------------------------- pairs
+
+def cmd_pairs() -> None:
+    pairs_ = cfg().get("pairs", [])
+    rows = _rows([(f"{a} / {b}", f"pr:{a}:{b}") for a, b in pairs_], 2) + [[HOME]]
+    telegram.send_text("⚖️ <b>PAIRS TRADING</b> (statistical arbitrage)\nTwo related stocks that usually move together: "
+                       "when the gap between them stretches (z-score beyond ±2), buy the cheap one and sell the rich "
+                       "one, then exit when the gap closes.\nTap a pair, or send <code>/pair TCS INFY</code> 👇",
+                       buttons=rows)
+
+
+def deliver_pair(a: str, b: str) -> None:
+    from bot import pairs
+
+    r = pairs.analyze(a, b)
+    telegram.send_photo(pairs.chart(r), f"⚖️ <b>{r.a} / {r.b}</b> · z-score {r.z_now:+.2f}")
+    telegram.send_text(pairs.report_text(r), buttons=[[(f"📈 {r.a}", f"a:s:{r.a}"), (f"📈 {r.b}", f"a:s:{r.b}")],
+                                                      [("🔄 Refresh", f"pr:{r.a}:{r.b}"), ("⚖️ Other pairs", "pr"), HOME]])
+
+
+# ---------------------------------------------------------------- paper trading
+
+def paper_buttons(trades: list[dict]) -> list:
+    rows = _rows([(f"❌ Exit #{t['id']} {t['symbol'][:10]}", f"pt:x:{t['id']}") for t in trades[:12]], 2)
+    c = telegram.ctx()
+    extra = [("📜 History", "pt:h")] + ([("🏆 Board", "pt:bd")] if c and c.is_group else [])
+    rows.append([("🔄 Refresh", "pt:l")] + extra)
+    rows.append([HOME])
+    return rows
+
+
+def paper_status(message_id: int | None = None) -> None:
+    uid, name, chat = who()
+    closed_now = paper.check_stops(chat, uid)
+    trades = paper.open_trades(chat, uid)
+    prices = {t["id"]: paper.live_price(t["market"], t["symbol"]) for t in trades}
+    title = "PAPER TRADES" + (f" · {name}" if telegram.ctx() and telegram.ctx().is_group else "")
+    text = paper.status_text(trades, prices, title, closed_now)
+    warn = paper.risk_warning(chat, uid)
+    if warn:
+        text += "\n\n" + warn
+    telegram.show(text, None, paper_buttons(trades), message_id)
+
+
+def paper_ticket(market: str, sym: str, tf: str) -> None:
+    a = report.get(market, sym, tf, with_flow=False)
+    uid, name, chat = who()
+    text = paper.plan_text(a, name)
+    warn = paper.risk_warning(chat, uid)
+    if warn:
+        text += "\n\n" + warn
+    telegram.send_text(text, buttons=[[("🟢 Paper BUY", f"pt:b:{a.cb}"), ("🔴 Paper SELL", f"pt:s:{a.cb}")],
+                                      [("💼 My paper trades", "pt:l"), HOME]])
+
+
+def paper_open(market: str, sym: str, tf: str, side: str, qty: float | None = None) -> None:
+    a = report.get(market, sym, tf, with_flow=False)
+    a.live_price = paper.live_price(market, a.symbol) or a.now_price
+    uid, name, chat = who()
+    t = paper.open_trade(a, side, uid, name, chat, qty)
+    icon = "🟢" if side == "BUY" else "🔴"
+    telegram.send_text(
+        f"{icon} <b>Paper {side} opened · #{t['id']}</b>\n{html.escape(t['pretty'])} {t['qty']:g} "
+        f"{html.escape(t['unit'])} at <b>{report.price_txt(a, t['entry'])}</b> ({t['tf']})\n"
+        f"🛑 Stop {report.price_txt(a, t['stop'])} · 🎯 Target {report.price_txt(a, t['target'])}\n"
+        f"<i>Levels from: {html.escape(t['strategy'])}</i>",
+        buttons=[[("💼 My paper trades", "pt:l"), (f"❌ Exit #{t['id']}", f"pt:x:{t['id']}")], [HOME]])
+
+
+def paper_exit(trade_id: int) -> None:
+    uid, _, chat = who()
+    t = paper.exit_trade(trade_id, uid, chat, telegram_chat_id())
+    icon = "🟢" if t["pnl"] >= 0 else "🔴"
+    telegram.send_text(f"{icon} <b>Paper trade #{t['id']} closed</b> · {html.escape(t['pretty'])} {t['side']}\n"
+                       f"Entry {t['entry']:,.6g} → exit {t['exit']:,.6g} = <b>{t['pnl_pct']:+.2f}%</b> "
+                       f"({'+' if t['pnl'] >= 0 else '−'}{abs(t['pnl']):,.2f} {t['currency']})"
+                       + (f" · {t['r']:+.2f}R" if t.get("r") is not None else ""),
+                       buttons=[[("💼 My paper trades", "pt:l"), ("📜 History", "pt:h")], [HOME]])
+
+
+def paper_callback(rest: str, message_id: int | None) -> None:
+    sub, _, val = rest.partition(":")
+    if sub == "l":
+        paper_status(message_id)
+    elif sub == "h":
+        uid, name, chat = who()
+        telegram.send_text(paper.history_text(paper.closed_trades(chat, uid), name),
+                           buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    elif sub == "bd":
+        _, _, chat = who()
+        telegram.send_text(paper.board_text(chat), buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    elif sub == "x" and val.isdigit():
+        paper_exit(int(val))
+    elif sub in ("o", "b", "s"):
+        code, _, rest2 = val.partition(":")
+        sym, _, tf = rest2.partition(":")
+        market = report.CODE_MARKET.get(code, "crypto")
+        tf = data.norm_tf(tf, report.default_tf(market))
+        if sub == "o":
+            paper_ticket(market, sym, tf)
+        else:
+            paper_open(market, sym, tf, "BUY" if sub == "b" else "SELL")
+
+
+def cmd_paper(args: list[str]) -> None:
+    if not args:
+        paper_status()
+        return
+    act = args[0].lower()
+    if act in ("buy", "sell") and len(args) >= 2:
+        rest, tf = split_tf(args[1:])
+        sym, market = report.resolve(rest[0])
+        qty = float(rest[1]) if len(rest) > 1 and rest[1].replace(".", "", 1).isdigit() else None
+        try:
+            a = report.analyze(sym, market, tf=tf)
+        except data.DataError:
+            if market != "crypto":
+                raise
+            a = report.analyze(sym, "stock", tf=tf)
+        paper_open(a.market, a.symbol, a.timeframe, act.upper(), qty)
+    elif act in ("history", "h"):
+        paper_callback("h", None)
+    elif act in ("board", "leaderboard"):
+        paper_callback("bd", None)
+    else:
+        telegram.send_text("Use <code>/paper</code> (status), <code>/paper buy ETH</code>, "
+                           "<code>/paper sell RELIANCE 10 15m</code>, <code>/exit 3</code>.", buttons=[[HOME]])
 
 
 # ---------------------------------------------------------------- news
@@ -301,34 +684,37 @@ def news_buttons(total_items: int, page: int, cat: str) -> list:
     if page < total:
         nav.append(("Next ▶️", f"n:p:{page + 1}"))
     rows.append(nav)
-    rows.append([(("• " if c == cat else "") + label, f"n:t:{c}") for c, label in news.CATEGORIES.items()])
+    tabs = [(("• " if c == cat else "") + label, f"n:t:{c}") for c, label in news.CATEGORIES.items()]
+    rows += [tabs[:3], tabs[3:]]
     rows.append([("🔄 Refresh", "n:r"), HOME])
     return rows
 
 
 def cmd_news(chat_id: str, cat: str = "all", message_id: int | None = None) -> None:
-    """cat: all / india / world / crypto, or 'q:SYMBOL' for one stock's news."""
+    """cat: all / india / forex / crypto / other, or 'q:SYMBOL' for one stock's news."""
     query = cat[2:] if cat.startswith("q:") else None
+    if not query:
+        cat = news.CAT_ALIASES.get(cat, cat)
     items = news.collect("all" if query else cat, query=query)
-    state.remember_news(chat_id, cat, [i.to_dict() for i in items], 1)
+    state.remember_news(key_of(chat_id), cat, [i.to_dict() for i in items], 1)
     show_news_page(chat_id, 1, message_id)
 
 
 def show_news_page(chat_id: str, page: int, message_id: int | None = None) -> None:
-    entry = state.news(chat_id)
+    entry = state.news(key_of(chat_id))
     if not entry:
         cmd_news(chat_id, "all", message_id)
         return
     items = [news.Item.from_dict(d) for d in entry["items"]]
     page = min(max(page, 1), news.pages(items))
-    state.set_news_page(chat_id, page)
+    state.set_news_page(key_of(chat_id), page)
     cat = entry["cat"]
-    telegram.show(news.page_text(items, page, cat, _news_title(cat)), chat_id,
+    telegram.show(news.page_text(items, page, cat, _news_title(cat)), None,
                   news_buttons(len(items), page, cat), message_id)
 
 
 def news_detail(chat_id: str, n: int) -> None:
-    entry = state.news(chat_id)
+    entry = state.news(key_of(chat_id))
     items = entry["items"] if entry else []
     if not (1 <= n <= len(items)):
         telegram.send_text("Send /news first, then a story number from that list.",
@@ -340,8 +726,11 @@ def news_detail(chat_id: str, n: int) -> None:
     stocks, coins = news.watch_symbols(it)
     rows = []
     watch = [(f"📈 {s}", f"a:s:{s}") for s in stocks] + [(f"🪙 {c}", f"a:c:{c}USDT") for c in coins]
+    if "forex" in (it.cats or []):
+        watch += [("🥇 XAUUSD", "a:f:XAUUSD"), ("🛢 USOIL", "a:f:USOIL")] if any(
+            r in it.rules for r in ("gold", "crude")) else [("🇮🇳 USDINR", "a:f:USDINR")]
     if watch:
-        rows += _rows(watch, 3)
+        rows += _rows(watch[:6], 3)
     if it.link.startswith(("https://", "http://")):
         rows.append([("🔗 Read full article", it.link)])
     nav = [("⬅️ Back to list", f"n:p:{(n - 1) // news.PAGE + 1}")]
@@ -360,7 +749,7 @@ def news_callback(rest: str, chat_id: str, message_id: int | None) -> None:
     elif sub == "q":
         cmd_news(chat_id, f"q:{val.upper()}")
     elif sub == "r":
-        entry = state.news(chat_id)
+        entry = state.news(key_of(chat_id))
         cmd_news(chat_id, entry["cat"] if entry else "all", message_id)
     elif sub == "p":
         show_news_page(chat_id, int(val) if val.isdigit() else 1, message_id)
@@ -373,29 +762,44 @@ def news_callback(rest: str, chat_id: str, message_id: int | None) -> None:
 def cmd_strategies() -> None:
     from bot.strategies import FAMILIES, LONGS, SHORTS
 
-    lines = ["📚 <b>THE 7 STRATEGIES</b> (each has a BUY and a SELL version)"]
-    for n, ((fam, title), lo, sh) in enumerate(zip(FAMILIES, LONGS, SHORTS)):
-        lines.append(f"\n{report.KEYCAP[n]} <b>{html.escape(title)}</b>\n🟢 {html.escape(lo.idea)}\n"
-                     f"🔴 {html.escape(sh.idea)}")
+    lines = [f"📚 <b>THE {len(FAMILIES)} STRATEGIES</b> (each has a 🟢 BUY and a 🔴 SELL version)",
+             "<i>Trend → 1, 2, 3, 4, 7, 8, 12, 13 · Range → 10, 11, 14 · Any → 5, 6, 9</i>"]
+    for n, ((fam, title), lo, sh) in enumerate(zip(FAMILIES, LONGS, SHORTS), 1):
+        extra = f"\n🚪 {html.escape(lo.exit_note)}" if lo.exit_note else ""
+        lines.append(f"\n{report.num_label(n)} <b>{html.escape(title)}</b> · {lo.regime}\n🟢 {html.escape(lo.idea)}\n"
+                     f"🔴 {html.escape(sh.idea)}{extra}")
     r = cfg()["risk"]
-    lines.append(f"\nStop from ATR or the nearest level; take profit = {r['target_r']:g}× the risk.\n"
-                 "🟢 ready = all 3 conditions met · 🟡 forming = 2 of 3.")
+    lines.append("\n<b>Not on the chart list:</b> 🦅 option selling (iron condor) → 🧠 F&amp;O plan · "
+                 "⚖️ pairs trading → /pairs")
+    lines.append(f"\nStops from ATR, swings or the level; default take profit = {r['target_r']:g}× the risk.\n"
+                 "🟢/🔴 ready = all 3 conditions met · 🟡 forming = 2 of 3 · ➖ not for this chart.\n"
+                 f"Risk rules: {r['risk_per_trade_pct']}% per trade · stop after "
+                 f"{r.get('max_losing_trades_per_day', 3)} losing trades or {r.get('max_daily_loss_pct', 2)}% loss a day.\n"
+                 "<i>Win rates quoted online are backtest ranges, not guarantees. Expectancy = win% × avg win − "
+                 "loss% × avg loss: check each strategy's own history line.</i>")
     telegram.send_text("\n".join(lines), buttons=[[HOME]])
 
 
 def cmd_settings() -> None:
     c = cfg()
     r = c["risk"]
+    groups = sorted(allowed_chats() - {telegram_chat_id()} | approved_groups())
     telegram.send_text(
         "⚙️ <b>SETTINGS</b> (edit config.json on GitHub to change)\n"
-        f"💰 Capital: ₹{r['capital_inr']:,} (NSE) · {r['capital_usdt']:,} USDT (crypto)\n"
+        f"💰 Capital: ₹{r['capital_inr']:,} (NSE/MCX) · {r['capital_usdt']:,} USDT (crypto) · "
+        f"{r.get('capital_usd', r['capital_usdt']):,} USD (forex)\n"
         f"🛡 Risk per trade: {r['risk_per_trade_pct']}% · take profit {r['target_r']:g}R\n"
-        f"🪙 Crypto: top {c['crypto']['top_n_by_volume']} by volume + {', '.join(c['crypto']['always_include'])} "
-        f"· {c['crypto']['timeframe']} candles\n"
+        f"⏱ Default timeframes: crypto {report.default_tf('crypto')} · NSE {report.default_tf('stock')} · "
+        f"forex {report.default_tf('fx')}\n"
+        f"🪙 Crypto: top {c['crypto']['top_n_by_volume']} by volume + {', '.join(c['crypto']['always_include'])}\n"
         f"📈 Stocks: {', '.join(c['stocks']['watchlist'])}\n"
         f"🏛 Indices: {', '.join(c['stocks'].get('indices', []))}\n"
-        f"📊 Data: crypto Binance (live) · NSE {'Angel One (live)' if angel.configured() else 'Yahoo (delayed)'}\n"
-        "🏢 Fundamentals: Yahoo Finance · 📰 News: public RSS feeds\n"
+        f"📊 Data: crypto Binance (live) · NSE/MCX {'Angel One (live)' if angel.configured() else 'Yahoo (delayed)'}\n"
+        + "\n".join(fx.source_status()) + "\n"
+        "🏢 Fundamentals: Yahoo Finance · 📰 News: Moneycontrol, ET, Mint, CoinDesk, Google News\n"
+        f"💾 Paper trades saved in: {html.escape(store.describe())}\n"
+        f"👥 Groups allowed: {len(groups)}"
+        + (f" ({html.escape(', '.join(groups))})" if groups else " — add the bot to a group and send /allow there") + "\n"
         f"🤖 AI summary: {'on' if gemini_key() and gemini_model() else 'off'}",
         buttons=[[HOME]],
     )
@@ -403,7 +807,7 @@ def cmd_settings() -> None:
 
 # ---------------------------------------------------------------- routing
 
-SYMBOL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&-.")
+SYMBOL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&-./")
 
 
 def _looks_like_symbol(token: str) -> bool:
@@ -412,74 +816,107 @@ def _looks_like_symbol(token: str) -> bool:
 
 
 def handle(text: str, chat_id: str | None = None) -> None:
-    chat_id = chat_id or telegram_chat_id()
+    chat_id = str(chat_id or telegram_chat_id())
+    key = key_of(chat_id)
     raw = text.strip()
     parts = raw.split()
     if not parts:
         return
     cmd = parts[0].lower().split("@")[0]
-    arg = " ".join(parts[1:])
+    args = parts[1:]
+    arg = " ".join(args)
     if cmd.startswith("/"):
-        state.set_wait(chat_id, None)
+        state.set_wait(key, None)
     if cmd in ("/start", "/menu"):
         telegram.send_text(WELCOME, buttons=MENU)
     elif cmd == "/help":
         telegram.send_text(HELP, buttons=MENU)
-    elif cmd == "/crypto":
-        cmd_list("crypto", chat_id)
-    elif cmd == "/stocks":
-        cmd_list("stocks", chat_id)
+    elif cmd in ("/crypto", "/stocks", "/forex", "/fx"):
+        _, tf = split_tf(args)
+        market = {"/crypto": "crypto", "/stocks": "stocks"}.get(cmd, "fx")
+        cmd_list(market, chat_id, tf)
     elif cmd == "/stock":
-        open_stock(arg, "stock") if arg else prompt(chat_id, "stock")
+        rest, tf = split_tf(args)
+        open_stock(" ".join(rest), "stock", tf) if rest else prompt(chat_id, "stock")
     elif cmd == "/search":
         cmd_search(arg) if arg else prompt(chat_id, "stock")
     elif cmd in ("/fundamentals", "/fundamental", "/fund"):
         open_stock(arg, "fund") if arg else prompt(chat_id, "fund")
     elif cmd == "/fno":
         open_stock(arg, "fno") if arg else prompt(chat_id, "fno")
+    elif cmd in ("/greeks", "/greek"):
+        open_stock(arg, "grk") if arg else prompt(chat_id, "grk")
+    elif cmd in ("/plan", "/fnoplan"):
+        if args and args[-1].lower() in PLAN_LABEL:
+            sym, _ = symbols.find_stock(" ".join(args[:-1]))
+            deliver_plan(sym or args[0].upper(), args[-1].lower())
+        else:
+            open_stock(arg, "fop") if arg else prompt(chat_id, "fop")
     elif cmd in ("/futures", "/future", "/fut"):
         open_stock(arg, "fut") if arg else prompt(chat_id, "fut")
     elif cmd == "/buildup":
         cmd_buildup()
+    elif cmd == "/vix":
+        cmd_vix()
     elif cmd == "/news":
-        a = arg.lower()
+        a = news.CAT_ALIASES.get(arg.lower(), arg.lower())
         cmd_news(chat_id, a if a in news.CATEGORIES else (f"q:{symbols.clean(arg)}" if arg else "all"))
     elif cmd == "/strategies":
         cmd_strategies()
     elif cmd == "/settings":
         cmd_settings()
-    elif cmd == "/analyze":
-        if arg:
-            deliver(report.analyze_any(parts[1]))
+    elif cmd == "/paper":
+        cmd_paper(args)
+    elif cmd == "/exit":
+        if args and args[0].lstrip("#").isdigit():
+            paper_exit(int(args[0].lstrip("#")))
         else:
-            telegram.send_text("Which one? Example: <code>/analyze ETH</code> or just send <code>ETH</code>.")
+            telegram.send_text("Which trade? Example: <code>/exit 3</code> (numbers are in /paper).")
+    elif cmd == "/history":
+        paper_callback("h", None)
+    elif cmd == "/board":
+        paper_callback("bd", None)
+    elif cmd == "/pairs":
+        cmd_pairs()
+    elif cmd == "/pair":
+        if len(args) >= 2:
+            deliver_pair(symbols.clean(args[0]), symbols.clean(args[1]))
+        else:
+            cmd_pairs()
+    elif cmd == "/analyze":
+        rest, tf = split_tf(args)
+        if rest:
+            deliver(report.analyze_any(rest[0], tf))
+        else:
+            telegram.send_text("Which one? Example: <code>/analyze ETH 15m</code> or just send <code>ETH</code>.")
     elif len(parts) == 1 and cmd.isdigit():
         pick_number(chat_id, int(cmd))
     elif cmd.startswith("/"):
         telegram.send_text("I don't know that command. Here's the menu 👇", buttons=MENU)
     else:
-        mode = state.take_wait(chat_id)
+        mode = state.take_wait(key)
+        rest, tf = split_tf(parts)
         if mode:
-            open_stock(raw, mode)
-        elif len(parts) == 1 and _looks_like_symbol(parts[0]):
-            quick_symbol(parts[0])
-        elif len(parts) <= 4 and all(p.replace("&", "").replace(".", "").isalnum() for p in parts):
-            open_stock(raw, "stock")  # e.g. "tata motors": opens it if only one stock matches
+            open_stock(" ".join(rest) or raw, mode, tf)
+        elif len(rest) == 1 and _looks_like_symbol(rest[0]):
+            quick_symbol(rest[0], tf)
+        elif len(rest) <= 4 and all(p.replace("&", "").replace(".", "").isalnum() for p in rest):
+            open_stock(" ".join(rest), "stock", tf)  # e.g. "tata motors": opens it if only one stock matches
         else:
             telegram.send_text("I didn't understand that. Here's the menu 👇", buttons=MENU)
 
 
-def quick_symbol(token: str) -> None:
-    """A bare symbol: crypto first, then NSE; if neither exists, offer the closest NSE matches."""
+def quick_symbol(token: str, tf: str | None = None) -> None:
+    """A bare symbol: forex/commodity, then crypto, then NSE; if none exists, offer the closest NSE matches."""
     try:
-        a = report.analyze_any(token)
+        a = report.analyze_any(token, tf)
     except data.DataError:
         sym, matches = symbols.find_stock(token)
         if matches:
             show_matches(token, matches)
             return
         if sym and sym != symbols.clean(token):
-            deliver(report.analyze(sym, "stock", with_flow=True))
+            analyze_and_deliver("stock", sym, tf)
             return
         raise
     deliver(a)
@@ -487,15 +924,24 @@ def quick_symbol(token: str) -> None:
 
 def pick_number(chat_id: str, number: int) -> None:
     """A typed number refers to whichever numbered list was sent last: news or a scanner."""
-    if state.last_kind(chat_id) == "news":
+    key = key_of(chat_id)
+    if state.last_kind(key) == "news":
         news_detail(chat_id, number)
         return
-    picked = state.pick(chat_id, number)
+    picked = state.pick(key, number)
     if picked is None:
-        telegram.send_text("Send /crypto or /stocks first (or /news), then a number from that list.", buttons=MENU)
+        telegram.send_text("Send /crypto, /stocks or /forex first (or /news), then a number from that list.",
+                           buttons=MENU)
         return
-    market, symbol = picked
-    deliver(report.analyze(symbol, market, with_flow=True))
+    market, symbol, tf = picked
+    analyze_and_deliver(market, symbol, tf)
+
+
+def _parse_asset_cb(rest: str) -> tuple[str, str, str | None]:
+    code, _, tail = rest.partition(":")
+    sym, _, tf = tail.partition(":")
+    market = report.CODE_MARKET.get(code, "crypto")
+    return market, sym, (data.norm_tf(tf) if tf else None)
 
 
 def handle_callback(data_str: str, chat_id: str, message_id: int | None = None) -> None:
@@ -503,16 +949,38 @@ def handle_callback(data_str: str, chat_id: str, message_id: int | None = None) 
     if kind == "cmd":
         handle(rest, chat_id)
     elif kind == "a":
-        code, _, symbol = rest.partition(":")
-        deliver(report.analyze(symbol, "crypto" if code == "c" else "stock", with_flow=True))
+        market, sym, tf = _parse_asset_cb(rest)
+        analyze_and_deliver(market, sym, tf)
+    elif kind in ("d", "st", "ob", "vx"):
+        market, sym, tf = _parse_asset_cb(rest)
+        deliver_details(market, sym, tf or report.default_tf(market), kind)
     elif kind == "fno":
         deliver_fno(rest)
+    elif kind == "gk":
+        deliver_greeks(rest)
+    elif kind == "fp":
+        name, _, which = rest.partition(":")
+        deliver_plan(name, which or "auto")
     elif kind == "fu":
         deliver_futures(rest)
     elif kind == "fd":
         deliver_fundamentals(rest)
+    elif kind == "fdd":
+        deliver_fundamentals(rest, detailed=True)
     elif kind == "bu":
         cmd_buildup()
+    elif kind == "vix":
+        cmd_vix()
+    elif kind == "pr":
+        if rest:
+            a, _, b = rest.partition(":")
+            deliver_pair(a, b)
+        else:
+            cmd_pairs()
+    elif kind == "pt":
+        paper_callback(rest, message_id)
+    elif kind == "m" and rest == "fx":
+        fx_menu(chat_id)
     elif kind == "m" and rest in PROMPTS:
         prompt(chat_id, rest)
     elif kind == "n":
@@ -526,42 +994,144 @@ def _safely(what: str, fn, *args) -> None:
         telegram.send_text(f"⚠️ Data problem: {html.escape(str(exc))}", buttons=[[HOME]])
     except angel.AngelError as exc:
         telegram.send_text(f"⚠️ Angel One: {html.escape(str(exc))}", buttons=[[HOME]])
+    except paper.PaperError as exc:
+        telegram.send_text(f"💼 {html.escape(str(exc))}", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    except store.StoreError as exc:
+        telegram.send_text(f"💾 Storage problem: {html.escape(str(exc))}", buttons=[[HOME]])
     except Exception as exc:  # report, never crash the run
         log.error("%s failed: %s\n%s", what, exc, traceback.format_exc())
         telegram.send_text(f"⚠️ Something went wrong with “{html.escape(what[:50])}” "
-                           f"({html.escape(exc.__class__.__name__)}). Check the logs (GitHub Actions or "
-                           "Cloud Run).", buttons=[[HOME]])
+                           f"({html.escape(exc.__class__.__name__)}). Check the logs (GitHub Actions, Cloud Run "
+                           "or the PC window).", buttons=[[HOME]])
 
 
 def safe_handle(text: str) -> None:
     _safely(text, handle, text)
 
 
+# ---------------------------------------------------------------- who may use the bot
+
+_GROUPS: dict = {}
+
+
+def approved_groups() -> set[str]:
+    hit = _GROUPS.get("g")
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    g = store.approved_groups()
+    _GROUPS["g"] = (time.time(), g)
+    return g
+
+
+def authorized(chat_id: str, is_group: bool, user_id: str) -> bool:
+    owner = telegram_chat_id()
+    users = allowed_users()
+    if not is_group:
+        return chat_id == owner or user_id in users
+    if chat_id not in allowed_chats() and chat_id not in approved_groups():
+        return False
+    return not users or user_id in users or user_id == owner
+
+
+def _chat_info(chat: dict, user: dict) -> tuple[str, bool, str, str]:
+    cid = str(chat.get("id"))
+    ctype = chat.get("type") or ("group" if cid.startswith("-") else "private")
+    name = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or user.get("username") or "member"
+    return cid, ctype in ("group", "supergroup"), str(user.get("id", cid)), name
+
+
+def owner_command(text: str, chat_id: str, is_group: bool, user_id: str) -> bool:
+    """/id anywhere; /allow and /deny in a group (owner only). Returns True if handled."""
+    cmd = text.strip().split()[0].lower().split("@")[0] if text.strip() else ""
+    owner = telegram_chat_id()
+    if cmd == "/id":
+        if user_id == owner or authorized(chat_id, is_group, user_id):
+            telegram.send_text(f"🆔 Chat ID <code>{html.escape(chat_id)}</code> · your user ID "
+                               f"<code>{html.escape(user_id)}</code>")
+        return True
+    if cmd in ("/allow", "/deny") and is_group:
+        if user_id != owner:
+            return True     # silently ignore: only the owner can approve a group
+        store.set_group(chat_id, cmd == "/allow")
+        _GROUPS.clear()
+        if cmd == "/allow":
+            telegram.send_text("✅ This group can now use SHIVAM AI TRADER. Members: send /start, or use commands "
+                               "like <code>/analyze ETH</code>. Each member has their own lists and paper trades.",
+                               buttons=MENU)
+        else:
+            telegram.send_text("🚫 This group can no longer use the bot.")
+        return True
+    return False
+
+
+def wants_reply(msg: dict, text: str, key: str) -> tuple[bool, str]:
+    """In groups the bot only answers commands, replies to its own messages, @mentions, a pending
+    menu question, or a bare number right after one of its lists — never ordinary chat."""
+    me = telegram.bot_username().lower()
+    t = text.strip()
+    if t.startswith("/"):
+        first = t.split()[0]
+        if "@" in first and me and first.split("@", 1)[1].lower() != me:
+            return False, t           # a command for another bot
+        return True, t
+    if me and f"@{me}" in t.lower():
+        import re
+        return True, re.sub(rf"@{re.escape(me)}\b", "", t, flags=re.I).strip()
+    reply = (msg.get("reply_to_message") or {}).get("from") or {}
+    if reply.get("is_bot") and (not me or str(reply.get("username", "")).lower() == me):
+        return True, t
+    if state.pending_wait(key):
+        return True, t
+    if t.isdigit() and state.recent_list(key):
+        return True, t
+    return False, t
+
+
 def process_update(u: dict) -> None:
-    """Handle one Telegram update (a message or a button tap). Used by GitHub runs and Cloud Run."""
-    allowed = telegram_chat_id()
+    """Handle one Telegram update (a message or a button tap). Used by GitHub runs, Cloud Run and the PC."""
     if "callback_query" in u:
         cb = u["callback_query"]
-        who = str((cb.get("from") or {}).get("id"))
-        where = str(((cb.get("message") or {}).get("chat") or {}).get("id"))
+        msg = cb.get("message") or {}
+        cid, is_group, uid, name = _chat_info(msg.get("chat") or {}, cb.get("from") or {})
+        if not authorized(cid, is_group, uid):
+            telegram.answer_callback(cb["id"], "This bot is private.")
+            log.warning("Ignored a button tap from chat %s user %s.", cid, uid)
+            return
         telegram.answer_callback(cb["id"], "Working on it…")
-        if who != allowed or where != allowed:
-            log.warning("Ignored a button tap from another chat.")
-            return
         log.info("Button: %s", cb.get("data", "")[:60])
-        if cb.get("data") == "n:x":   # page indicator: nothing to do
+        if cb.get("data") == "n:x":   # page indicator / section title: nothing to do
             return
-        telegram.chat_action(allowed)
-        mid = (cb.get("message") or {}).get("message_id")
-        _safely(cb.get("data", ""), handle_callback, cb.get("data", ""), allowed, mid)
+        thread = msg.get("message_thread_id") if msg.get("is_topic_message") else None
+        token = telegram.set_ctx(telegram.Ctx(cid, uid, name, is_group, None, thread))
+        try:
+            telegram.chat_action(cid)
+            _safely(cb.get("data", ""), handle_callback, cb.get("data", ""), cid, msg.get("message_id"))
+        finally:
+            telegram.reset_ctx(token)
         return
     msg = u.get("message") or {}
-    if str((msg.get("chat") or {}).get("id")) != allowed or not msg.get("text"):
-        log.warning("Ignored a message from another chat.")
+    text = msg.get("text") or ""
+    if not text:
         return
-    log.info("Command: %s", msg["text"][:60])
-    telegram.chat_action(allowed)
-    _safely(msg["text"], handle, msg["text"], allowed)
+    cid, is_group, uid, name = _chat_info(msg.get("chat") or {}, msg.get("from") or {})
+    thread = msg.get("message_thread_id") if msg.get("is_topic_message") else None
+    token = telegram.set_ctx(telegram.Ctx(cid, uid, name, is_group, msg.get("message_id") if is_group else None,
+                                          thread))
+    try:
+        if owner_command(text, cid, is_group, uid):
+            return
+        if not authorized(cid, is_group, uid):
+            log.warning("Ignored a message from chat %s user %s.", cid, uid)
+            return
+        if is_group:
+            ok, text = wants_reply(msg, text, telegram.ctx().key)
+            if not ok or not text:
+                return
+        log.info("Command: %s", text[:60])
+        telegram.chat_action(cid)
+        _safely(text, handle, text, cid)
+    finally:
+        telegram.reset_ctx(token)
 
 
 def run_commands() -> None:
@@ -596,6 +1166,94 @@ def webhook(action: str, url: str = "") -> None:
         print(telegram.webhook_info())
 
 
+# Same times as .github/workflows/alerts.yml (UTC): (market, weekdays only, hours, minute)
+ALERT_SLOTS = [
+    ("crypto", False, (0, 4, 8, 12, 16, 20), 7),
+    ("stocks", True, (10,), 40),
+    ("fno", True, (4,), 15),
+    ("fno", True, (9,), 0),
+]
+ALERT_WINDOW_MIN = 30
+
+
+def due_alerts(now, fired: set) -> list[str]:
+    """Alert scans whose time has come in the last 30 minutes and haven't run yet (now is UTC)."""
+    out = []
+    for market, weekdays, hours, minute in ALERT_SLOTS:
+        if weekdays and now.weekday() >= 5:
+            continue
+        for h in hours:
+            slot = now.replace(hour=h, minute=minute, second=0, microsecond=0)
+            key = f"{market}@{slot:%Y-%m-%d %H:%M}"
+            if key not in fired and 0 <= (now - slot).total_seconds() < ALERT_WINDOW_MIN * 60:
+                fired.add(key)
+                out.append(market)
+    return out
+
+
+def check_paper_all() -> None:
+    """PC/VM mode: close paper trades whose stop/target was hit and tell their owners."""
+    try:
+        doc = store.load()
+    except store.StoreError:
+        return
+    chats = {t["chat_id"] for t in doc.get("paper", {}).get("trades", []) if t["status"] == "open"}
+    for chat in chats:
+        try:
+            closed = paper.check_stops(chat)
+        except Exception as exc:
+            log.info("Paper check %s: %s", chat, exc)
+            continue
+        for c in closed:
+            icon = "🎯" if c["reason"].startswith("target") else "🛑"
+            mention = f"<a href=\"tg://user?id={c['user_id']}\">{html.escape(c['user_name'])}</a>"
+            telegram.send_text(f"{icon} {mention}: paper trade #{c['id']} {html.escape(c['pretty'])} {c['side']} — "
+                               f"{c['reason']} at {c['exit']:,.6g} → <b>{c['pnl_pct']:+.2f}%</b>", chat,
+                               buttons=[[("💼 Paper trades", "pt:l")]])
+
+
+def run_local(with_alerts: bool = True, max_loops: int | None = None) -> None:
+    """Own PC or a cloud VM: answer messages instantly (long polling) and, optionally, send the
+    scheduled alerts. Stop with Ctrl+C. Don't also run Cloud Run or GitHub's alerts, or you get doubles."""
+    from datetime import datetime, timezone
+
+    if not telegram_token() or not telegram_chat_id():
+        sys.exit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are missing: put them in the .env file")
+    hook = telegram.webhook_info().get("url")
+    if hook:
+        sys.exit(f"Telegram is connected to a webhook ({hook}), so this PC can't receive messages.\n"
+                 "Run:  python -m bot.main webhook delete   (then start this again)")
+    telegram.set_commands()
+    print("SHIVAM AI TRADER is running" + (" with alerts" if with_alerts else "") + ". Press Ctrl+C to stop.")
+    if fx.mt5_ready():
+        print("MetaTrader 5 connected: forex prices are live from your broker.")
+    offset, fired, loops, last_paper = None, set(), 0, time.time()
+    while max_loops is None or loops < max_loops:
+        loops += 1
+        try:
+            updates = telegram.poll_updates(offset)
+        except telegram.TelegramError as exc:
+            log.warning("Telegram: %s (retrying in 5 s)", exc)
+            time.sleep(5)
+            continue
+        for u in updates:
+            offset = u["update_id"] + 1
+            process_update(u)
+        if with_alerts:
+            for market in due_alerts(datetime.now(timezone.utc), fired):
+                log.info("Scheduled alert scan: %s", market)
+                _safely(f"alerts {market}", run_alerts, market)
+        if time.time() - last_paper > 300:
+            last_paper = time.time()
+            check_paper_all()
+        state.touch()
+
+
+def alert_chats() -> list[str]:
+    extra = [c.strip() for c in secret("ALERT_CHATS").split(",") if c.strip()]
+    return [telegram_chat_id()] + [c for c in extra if c != telegram_chat_id()]
+
+
 def run_alerts(market: str) -> None:
     if market == "fno":
         if not angel.configured():
@@ -610,11 +1268,16 @@ def run_alerts(market: str) -> None:
     fresh.sort(key=lambda a: a.score, reverse=True)
     limit = cfg()["alerts"]["max_per_run"]
     log.info("%s scan: %d analysed, %d fresh signals, %d errors", market, len(results), len(fresh), len(errors))
-    for a in fresh[:limit]:
-        _safely(f"alert {a.symbol}", deliver, a, True)
-    if len(fresh) > limit:
-        telegram.send_text("🔔 More new signals: " + ", ".join(a.short for a in fresh[limit:])
-                           + "\nSend /crypto or /stocks to see the full list.")
+    for chat in alert_chats():
+        token = telegram.set_ctx(telegram.Ctx(chat, chat, "", chat.startswith("-")))
+        try:
+            for a in fresh[:limit]:
+                _safely(f"alert {a.symbol}", deliver, a, True)
+            if len(fresh) > limit:
+                telegram.send_text("🔔 More new signals: " + ", ".join(a.short for a in fresh[limit:])
+                                   + "\nSend /crypto or /stocks to see the full list.")
+        finally:
+            telegram.reset_ctx(token)
 
 
 def selftest() -> None:
@@ -628,7 +1291,9 @@ def selftest() -> None:
     try:
         btc = data.crypto_candles("BTCUSDT")
         avg_vol = float(btc["volume"].tail(20).mean())
-        lines.append(f"✅ Crypto data OK (BTCUSDT {len(btc)} candles, last close {btc['close'].iloc[-1]:,.2f})")
+        lines.append(f"✅ Crypto data OK (BTCUSDT {len(btc)} candles, live {btc.attrs.get('live_price', 0):,.2f})")
+        m5 = data.crypto_candles("BTCUSDT", "5m", limit=300)
+        lines.append(f"✅ Crypto 5m candles OK ({len(m5)})")
     except data.DataError as exc:
         lines.append(f"❌ Crypto data failed: {exc}")
     flow = data.crypto_orderflow("BTCUSDT", avg_vol)
@@ -636,19 +1301,38 @@ def selftest() -> None:
     try:
         rel = data.stock_candles(cfg()["stocks"]["watchlist"][0])
         lines.append(f"✅ Stock data OK ({len(rel)} daily candles, {rel.attrs.get('source', '')})")
+        rel15 = data.stock_candles(cfg()["stocks"]["watchlist"][0], "15m")
+        lines.append(f"✅ Stock 15m candles OK ({len(rel15)})")
     except data.DataError as exc:
         lines.append(f"❌ Stock data failed: {exc}")
+    v = vol.india_vix()
+    lines.append(f"✅ India VIX {v.value:.2f} ({v.label}, {v.source})" if v else "⚠️ India VIX unavailable")
+    for code in ("EURUSD", "XAUUSD"):
+        try:
+            d = fx.candles(code, "1h")
+            lines.append(f"✅ {code} OK ({len(d)} 1h candles, {d.attrs.get('source', '')})")
+        except data.DataError as exc:
+            lines.append(f"⚠️ {code}: {exc}")
+    lines += fx.source_status()
     if angel.configured():
         try:
             a = angel.session()
             lines.append("✅ Angel One login OK")
-            lines.append(f"✅ Instrument list OK ({len(a.inst):,} NSE/NFO contracts)")
+            lines.append(f"✅ Instrument list OK ({len(a.inst):,} NSE/NFO/MCX/CDS contracts)")
             snap = angel.build_snapshot(a, "NIFTY", 3)
             oi_ok = any(l.oi for l in snap.legs)
-            greeks_ok = any(l.iv is not None for l in snap.legs)
+            greeks_ok = any(l.gamma is not None for l in snap.legs)
             lines.append(f"✅ NIFTY live {snap.spot:,.2f}, expiry {snap.expiry:%d %b}, {len(snap.legs)} option legs")
             lines.append(("✅" if oi_ok else "⚠️") + f" Open interest {'found' if oi_ok else 'all zero'}")
-            lines.append(("✅" if greeks_ok else "ℹ️") + f" Greeks {'found' if greeks_ok else 'empty (normal outside market hours)'}")
+            lines.append(("✅" if greeks_ok else "ℹ️") + " Greeks from Angel One "
+                         + ("found (delta, gamma, theta, vega, IV)" if greeks_ok else
+                            "empty (normal outside market hours; the bot computes them)"))
+            for code in ("GOLD", "USDINR"):
+                try:
+                    d = fx.candles(code, "1h")
+                    lines.append(f"✅ {code} OK ({d.attrs.get('source', '')})")
+                except data.DataError as exc:
+                    lines.append(f"⚠️ {code}: {exc}")
             try:
                 rep = angel.build_futures(a, "NIFTY")
                 lines.append(f"✅ Futures OK ({len(rep.legs)} NIFTY expiries, near {rep.legs[0].ltp:,.2f}); "
@@ -661,15 +1345,21 @@ def selftest() -> None:
         except angel.AngelError as exc:
             lines.append(f"❌ Angel One: {exc}")
     else:
-        lines.append("ℹ️ Angel One not configured: NSE data is delayed (Yahoo) and F&O is off")
-    working = [src for c, feeds in news.FEEDS.items() for src, url in feeds if news.fetch_feed(url, src, c)]
-    total = sum(len(f) for f in news.FEEDS.values())
+        lines.append("ℹ️ Angel One not configured: NSE data is delayed (Yahoo); F&O and MCX are off")
+    working = [src for c, feeds in news.FEEDS.items() if c != "world" for src, url in feeds
+               if news.fetch_feed(url, src, c)]
+    total = sum(len(f) for c, f in news.FEEDS.items() if c != "world")
     lines.append(("✅" if working else "❌") + f" News feeds: {len(working)} of {total} working")
     try:
         f = fundamentals.fetch(cfg()["stocks"]["watchlist"][0])
-        lines.append(f"✅ Fundamentals OK ({f.symbol}: {len(f.checks)} health checks from Yahoo)")
+        lines.append(f"✅ Fundamentals OK ({f.symbol}: {sum(len(r) for r in fundamentals.ratios(f).values())} ratios)")
     except data.DataError as exc:
         lines.append(f"⚠️ Fundamentals: {exc}")
+    try:
+        store.load()
+        lines.append(f"✅ Storage OK: {store.describe()}")
+    except store.StoreError as exc:
+        lines.append(f"❌ Storage: {exc}")
     if gemini_key() and gemini_model():
         ok = ai.summarize({"test": "Reply with one short sentence saying the connection works."})
         lines.append(f"✅ Gemini OK ({gemini_model()})" if ok else
@@ -698,6 +1388,8 @@ def main(argv: list[str]) -> None:
             run_alerts(argv[2] if len(argv) > 2 else "crypto")
         elif mode == "selftest":
             selftest()
+        elif mode == "local":
+            run_local(with_alerts="--no-alerts" not in argv)
         elif mode == "webhook":
             webhook(argv[2] if len(argv) > 2 else "info", argv[3] if len(argv) > 3 else "")
         else:
