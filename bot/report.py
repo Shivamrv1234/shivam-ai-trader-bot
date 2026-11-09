@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from bot import backtest, data, strategies
-from bot.config import capital, cfg, cost_pct
+from bot.config import cfg, cost_pct
 
 MIN_BARS = 220      # enough for EMA200
 MIN_BARS_SHORT = 120  # futures contracts with a short life (MCX/CDS daily): EMA200 rules are approximate
@@ -191,7 +191,7 @@ def load_candles(symbol: str, market: str, tf: str, for_scan: bool = False) -> p
     if market == "fx":
         from bot import fx
         return fx.candles(symbol, tf, for_scan=for_scan)
-    return data.stock_candles(symbol, tf)
+    return data.stock_candles(symbol, tf, live=not for_scan)
 
 
 def analyze(symbol: str, market: str, candles: pd.DataFrame | None = None,
@@ -334,54 +334,36 @@ def _candle_time(a: Analysis) -> str:
 
 
 def size_info(s, market: str, unit: str = "", a: Analysis | None = None) -> tuple[str, str] | None:
-    """(quantity text, max-loss text) for the configured capital and risk %, or None if too small."""
-    if a is not None and a.market == "fx":
-        return fx_size(s, a)
-    cap, cur = capital(market)
-    risk_pct = cfg()["risk"]["risk_per_trade_pct"]
-    unit_risk = abs(s.entry - s.stop) + s.entry * cost_pct(market) / 100 * 2
-    qty = min(cap * risk_pct / 100 / unit_risk, cap / s.entry)
-    if market == "stock":
-        qty = math.floor(qty)
-        if qty < 1:
-            return None
-        qty_txt = f"{qty} share{'s' if qty > 1 else ''}"
-    else:
-        qty_txt = f"{qty:.4g} {unit}".strip()
-    return qty_txt, f"{qty * unit_risk:,.2f} {cur}"
-
-
-def fx_size(s, a: Analysis) -> tuple[str, str] | None:
-    from bot import fx
-
-    asset = a.asset
-    if asset is None:
+    """(size, loss) at the smallest risk level of the ladder that fits, for compact displays."""
+    if a is None or s.entry is None or s.stop is None:
         return None
-    cap, cur = capital("fx", a.currency)
-    risk = cap * cfg()["risk"]["risk_per_trade_pct"] / 100
-    got = fx.size_lots(asset, s.entry, s.stop, risk)
-    if got is None:
-        return None
-    lots, per_lot = got
-    if asset.indian:
-        if lots < 1:
-            return f"1 lot (above your ₹{risk:,.0f} risk limit)", f"{per_lot:,.0f} {cur}"
-        n = math.floor(lots)
-        return f"{n} lot{'s' if n > 1 else ''}", f"{n * per_lot:,.0f} {cur}"
-    micro = math.floor(lots * 100) / 100
-    if micro < 0.01:
-        return f"0.01 lot (smallest; above your {risk:,.2f} {cur} limit)", f"{per_lot * 0.01:,.2f} {cur}"
-    return f"{micro:.2f} lot", f"{micro * per_lot:,.2f} {cur}"
+    from bot import risk
+
+    sp = risk.spec_for(a, s.entry)
+    for r in risk.ladder(a, s.entry, s.stop, s.target, sp):
+        if r.fits:
+            return risk.fmt_qty(r.qty, sp), risk.money(r.risk, sp.cur)
+    return None
 
 
 def position_size(s, market: str, unit: str = "", a: Analysis | None = None) -> str:
-    cap, cur = capital(market, a.currency if a else None)
-    risk_pct = cfg()["risk"]["risk_per_trade_pct"]
-    info = size_info(s, market, unit, a)
-    if info is None:
-        what = "1 share" if market == "stock" else "the smallest size"
-        return f"Size: {what} risks more than {risk_pct}% of {cap:,.0f} {cur} — skip, or raise capital."
-    return f"Size for {cap:,.0f} {cur} at {risk_pct}% risk: {info[0]} (max loss ≈ {info[1]})"
+    """One line: the whole risk ladder for this setup."""
+    from bot import risk
+
+    if a is None or s.entry is None:
+        return ""
+    sp = risk.spec_for(a, s.entry)
+    parts = []
+    for r in risk.ladder(a, s.entry, s.stop, s.target, sp):
+        if r.fits:
+            parts.append(f"{risk.money(r.budget, sp.cur)} → {risk.fmt_qty(r.qty, sp)} ({risk.money(r.reward, sp.cur, True)})")
+    if not parts:
+        rows = risk.ladder(a, s.entry, s.stop, s.target, sp)
+        if rows:
+            return (f"Risk ladder: the smallest size {risk.fmt_qty(rows[0].qty, sp)} risks "
+                    f"{risk.money(rows[0].risk, sp.cur)} — above the {risk.money(risk.max_risk(sp.cur), sp.cur)} maximum")
+        return ""
+    return "Risk ladder: " + " · ".join(parts)
 
 
 def _bt_line(s) -> str:
@@ -456,12 +438,10 @@ def card(a: Analysis) -> str:
                                            for lbl, p in best.targets))
         if rr is not None:
             lines.append(f"⚖️ Reward : Risk = {rr:.1f} : 1")
+        from bot import risk
+        lines += risk.ladder_lines(a, best.entry, best.stop, best.target, compact=True)
         if a.is_index:
-            lines.append(f"📦 Index — trade it via F&amp;O (buttons below)")
-        else:
-            info = size_info(best, a.market, a.short, a)
-            lines.append(f"📦 Size {info[0]} · max loss ≈ {info[1]}" if info else
-                         "📦 1 share risks more than your limit — skip")
+            lines.append("   <i>Index: sizes are futures lots — or use the F&amp;O buttons below</i>")
         bt = best.backtest
         hist = f" · history {bt['trades']} trades, win {bt['win_rate']}%" if bt.get("trades") else ""
         lines += [LINE, f"Levels from: {html.escape(best.name)}{hist}"]
@@ -535,8 +515,9 @@ def _strategy_block(n: int, title: str, s, a: Analysis) -> str:
         lines.append(f"{prefix}🎯 {price_txt(a, s.entry)} · 💰 {price_txt(a, s.target)} · 🛑 {price_txt(a, s.stop)}")
         if s.targets:
             lines.append("🎯 " + " · ".join(f"{html.escape(l)} {price_txt(a, p)}" for l, p in s.targets))
-        if not a.is_index:
-            lines.append("📦 " + position_size(s, a.market, a.short, a))
+        ps = position_size(s, a.market, a.short, a)
+        if ps:
+            lines.append("📦 " + ps)
     if s.exit_note and s.status in ("TRADE", "WATCH"):
         lines.append(f"🚪 {html.escape(s.exit_note)}")
     if s.status in ("TRADE", "WATCH"):

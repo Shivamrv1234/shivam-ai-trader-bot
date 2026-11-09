@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from bot import angel  # noqa: E402
-from bot.config import capital, cfg  # noqa: E402
+from bot.config import cfg  # noqa: E402
 from bot.fno import _lakh, _n, market_open_now  # noqa: E402
 
 LINE = "━━━━━━━━━━━━━━━━━━"
@@ -119,8 +119,7 @@ def trade_plan(rep: angel.FuturesReport, a) -> str:
     entry, stop, target = s.entry + shift, s.stop + shift, s.target + shift
     risk_lot = abs(s.entry - s.stop) * near.lot
     reward_lot = abs(s.target - s.entry) * near.lot
-    cap, _ = capital("stock")
-    limit = cap * cfg()["risk"]["risk_per_trade_pct"] / 100
+    from bot import risk
     action = "BUY (go long)" if side == "BUY" else "SELL (go short)"
     pre = "If it triggers: " if a.direction == "FORMING" else ""
     lines = [head, LINE,
@@ -129,11 +128,9 @@ def trade_plan(rep: angel.FuturesReport, a) -> str:
              f"💰 Take profit ≈ <b>{_n(target)}</b>",
              f"🛑 Stop-loss ≈ <b>{_n(stop)}</b>",
              f"📦 1 lot = {near.lot} units · risk ≈ ₹{risk_lot:,.0f} · reward ≈ ₹{reward_lot:,.0f}",
-             f"   = {risk_lot / cap * 100:.0f}% of your ₹{cap:,.0f} capital at risk "
-             f"(your limit is {cfg()['risk']['risk_per_trade_pct']}% = ₹{limit:,.0f})"]
-    if risk_lot > limit:
-        lines.append("⚠️ One lot risks far more than your limit. Paper-trade it, or use a defined-risk option "
-                     "trade (tap 📊 Option chain).")
+             risk.fits_text(risk_lot, "INR").replace("Max loss", "1-lot loss at the stop")]
+    if risk_lot > risk.max_risk("INR"):
+        lines.append("💡 A defined-risk option trade needs far less (tap 🧠 F&amp;O plan).")
     lines.append(f"Levels from: {html.escape(s.name)} · basis stays roughly constant until expiry.")
     lines.append("<i>Educational plan, not a recommendation. Not financial advice.</i>")
     return "\n".join(lines)

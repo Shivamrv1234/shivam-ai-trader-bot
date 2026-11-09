@@ -245,6 +245,18 @@ def scan(market: str, tf: str | None = None) -> tuple[list[report.Analysis], lis
             loaded = list(pool.map(load, items))
     else:
         loaded = [load(i) for i in items]
+    if mkt == "stock" and angel.configured():
+        # one quote request for every symbol (instead of one each): live price + today's change
+        try:
+            quotes = angel.session().ltp_many([sym for (sym, _), c, _ in loaded if c is not None])
+        except angel.AngelError as exc:
+            log.warning("Live prices for the list: %s", exc)
+            quotes = {}
+        for (sym, _), c, _ in loaded:
+            q = quotes.get(sym.upper())
+            if c is not None and q:
+                c.attrs["live_price"] = angel.num(angel.pick(q, "ltp")) or None
+                c.attrs["live_change_pct"] = angel.num(angel.pick(q, "percentChange"))
     for (sym, chg), candles, err in loaded:
         if err is not None:
             log.warning("%s", err)
@@ -559,78 +571,207 @@ def deliver_pair(a: str, b: str) -> None:
 
 # ---------------------------------------------------------------- paper trading
 
-def paper_buttons(trades: list[dict]) -> list:
-    rows = _rows([(f"❌ Exit #{t['id']} {t['symbol'][:10]}", f"pt:x:{t['id']}") for t in trades[:12]], 2)
+def paper_buttons(trades: list[dict], pending: list[dict]) -> list:
+    rows = []
+    for t in trades[:10]:
+        rows.append([(f"❌ Exit #{t['id']} {t['symbol'][:9]}", f"pt:x:{t['id']}"), (f"✏️ SL/TP #{t['id']}", f"pt:e:{t['id']}")])
+    for t in pending[:6]:
+        rows.append([(f"🚫 Cancel #{t['id']} {t['symbol'][:9]}", f"pt:n:{t['id']}"), (f"✏️ SL/TP #{t['id']}", f"pt:e:{t['id']}")])
     c = telegram.ctx()
-    extra = [("📜 History", "pt:h")] + ([("🏆 Board", "pt:bd")] if c and c.is_group else [])
-    rows.append([("🔄 Refresh", "pt:l")] + extra)
-    rows.append([HOME])
+    rows.append([("🔄 Refresh", "pt:l"), ("📜 History", "pt:h")] + ([("🏆 Board", "pt:bd")] if c and c.is_group else []))
+    rows.append([("🪙 Crypto", "cmd:/crypto"), ("📈 NSE", "cmd:/stocks"), ("💱 Forex", "m:fx"), HOME])
     return rows
 
 
 def paper_status(message_id: int | None = None) -> None:
     uid, name, chat = who()
-    closed_now = paper.check_stops(chat, uid)
-    trades = paper.open_trades(chat, uid)
-    prices = {t["id"]: paper.live_price(t["market"], t["symbol"]) for t in trades}
+    events = paper.check_stops(chat, uid)
+    trades, pending = paper.open_trades(chat, uid), paper.pending_orders(chat, uid)
+    prices = {t["id"]: paper.live_price(t["market"], t["symbol"]) for t in trades + pending}
     title = "PAPER TRADES" + (f" · {name}" if telegram.ctx() and telegram.ctx().is_group else "")
-    text = paper.status_text(trades, prices, title, closed_now)
+    text = paper.status_text(trades, prices, title, events, pending)
     warn = paper.risk_warning(chat, uid)
     if warn:
         text += "\n\n" + warn
-    telegram.show(text, None, paper_buttons(trades), message_id)
+    telegram.show(text, None, paper_buttons(trades, pending), message_id)
 
 
 def paper_ticket(market: str, sym: str, tf: str) -> None:
     a = report.get(market, sym, tf, with_flow=False)
-    uid, name, chat = who()
-    text = paper.plan_text(a, name)
+    a.live_price = paper.live_price(market, a.symbol) or a.now_price
+    uid, _, chat = who()
+    text = paper.ticket_text(a)
     warn = paper.risk_warning(chat, uid)
     if warn:
         text += "\n\n" + warn
-    telegram.send_text(text, buttons=[[("🟢 Paper BUY", f"pt:b:{a.cb}"), ("🔴 Paper SELL", f"pt:s:{a.cb}")],
+    cb = a.cb
+    telegram.send_text(text, buttons=[[("🟢 BUY · 🤖 bot levels", f"pt:r:b:{cb}"), ("🔴 SELL · 🤖 bot levels", f"pt:r:s:{cb}")],
+                                      [("✍️ BUY · my own", f"pt:c:b:{cb}"), ("✍️ SELL · my own", f"pt:c:s:{cb}")],
                                       [("💼 My paper trades", "pt:l"), HOME]])
 
 
-def paper_open(market: str, sym: str, tf: str, side: str, qty: float | None = None) -> None:
+def paper_step() -> None:
+    """Show the current step of the ticket and wait for a typed number."""
+    key = key_of(None)
+    d = state.draft(key)
+    if d is None:
+        telegram.send_text("That paper ticket expired. Tap 📝 Paper trade again.", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+        return
+    text, rows = paper.step_prompt(d)
+    state.set_wait(key, "pt" if d["step"] != "confirm" else None)
+    telegram.send_text(text, buttons=rows)
+
+
+def paper_start(market: str, sym: str, tf: str, side: str, recommended: bool) -> None:
     a = report.get(market, sym, tf, with_flow=False)
     a.live_price = paper.live_price(market, a.symbol) or a.now_price
+    state.set_draft(key_of(None), paper.new_draft(a, side, recommended))
+    paper_step()
+
+
+def paper_input(raw: str) -> None:
+    """A typed number or a tapped suggestion for the ticket."""
+    key = key_of(None)
+    d = state.draft(key)
+    if d is None:
+        telegram.send_text("No paper ticket open. Tap 📝 Paper trade under any analysis.", buttons=[[HOME]])
+        return
+    if d.get("edit_id"):
+        paper_edit_input(d, raw)
+        return
+    err = paper.apply_value(d, raw.strip())
+    state.set_draft(key, d)
+    if err:
+        telegram.send_text(f"⚠️ {html.escape(err)}")
+    paper_step()
+
+
+def paper_confirm() -> None:
+    key = key_of(None)
+    d = state.draft(key)
+    if d is None or d.get("step") != "confirm":
+        telegram.send_text("Nothing to confirm. Tap 📝 Paper trade again.", buttons=[[HOME]])
+        return
     uid, name, chat = who()
-    t = paper.open_trade(a, side, uid, name, chat, qty)
-    icon = "🟢" if side == "BUY" else "🔴"
-    telegram.send_text(
-        f"{icon} <b>Paper {side} opened · #{t['id']}</b>\n{html.escape(t['pretty'])} {t['qty']:g} "
-        f"{html.escape(t['unit'])} at <b>{report.price_txt(a, t['entry'])}</b> ({t['tf']})\n"
-        f"🛑 Stop {report.price_txt(a, t['stop'])} · 🎯 Target {report.price_txt(a, t['target'])}\n"
-        f"<i>Levels from: {html.escape(t['strategy'])}</i>",
-        buttons=[[("💼 My paper trades", "pt:l"), (f"❌ Exit #{t['id']}", f"pt:x:{t['id']}")], [HOME]])
+    d["live"] = paper.live_price(d["market"], d["symbol"]) or d["live"]
+    t = paper.place(d, uid, name, chat)
+    state.set_draft(key, None)
+    state.set_wait(key, None)
+    icon = "🟢" if t["side"] == "BUY" else "🔴"
+    what = "opened" if t["status"] == "open" else f"placed ({t['order']} order, waits for {t['entry']:,.6g})"
+    telegram.send_text(f"{icon} <b>Paper {t['side']} {what} · #{t['id']}</b>\n" + paper.trade_block(t, d["live"]),
+                       buttons=[[("💼 My paper trades", "pt:l")], [HOME]])
+
+
+def paper_edit_start(trade_id: int) -> None:
+    uid, _, chat = who()
+    t = paper.find(trade_id, chat)
+    if t["user_id"] != uid and uid != telegram_chat_id():
+        raise paper.PaperError(f"Trade #{trade_id} belongs to {t['user_name']}.")
+    d = {"edit_id": trade_id, "step": "sl", "side": t["side"], "entry": t["entry"], "cur": t["currency"],
+         "pretty": t["pretty"], "sl": t["stop"], "tp": t.get("target")}
+    state.set_draft(key_of(None), d)
+    paper_edit_prompt(d)
+
+
+def paper_edit_prompt(d: dict) -> None:
+    key = key_of(None)
+    state.set_wait(key, "pt")
+    cur = d["cur"]
+    f = paper._fmt
+    if d["step"] == "sl":
+        text = (f"✏️ <b>#{d['edit_id']} {html.escape(d['pretty'])}</b> · entry {f(d['entry'], cur)}\n"
+                f"Send a new <b>stop-loss</b>, or tap:")
+        rows = [[(f"Keep {f(d['sl'], cur)}", "pt:v:keep"), (f"Breakeven {f(d['entry'], cur)}", "pt:v:be")]]
+    else:
+        text = f"✏️ <b>#{d['edit_id']}</b> stop-loss {f(d['sl'], cur)}. Send a new <b>take profit</b>, or tap:"
+        rows = [[(f"Keep {f(d['tp'], cur)}", "pt:v:keep")]]
+    rows.append([("✖ Cancel", "pt:q")])
+    telegram.send_text(text, buttons=rows)
+
+
+def paper_edit_input(d: dict, raw: str) -> None:
+    key = key_of(None)
+    raw = raw.strip()
+    if raw == "keep":
+        v = d["sl"] if d["step"] == "sl" else d["tp"]
+    elif raw == "be":
+        v = d["entry"]
+    else:
+        v = paper.parse_number(raw)
+    up = d["side"] == "BUY"
+    err = None
+    if v is None or v <= 0:
+        err = "Please send a number."
+    elif d["step"] == "tp" and ((up and v <= d["entry"]) or (not up and v >= d["entry"])):
+        err = f"The target must be {'above' if up else 'below'} the entry."
+    if err:
+        telegram.send_text(f"⚠️ {err}")
+        paper_edit_prompt(d)
+        return
+    if d["step"] == "sl":
+        d["sl"], d["step"] = v, "tp"
+        state.set_draft(key, d)
+        paper_edit_prompt(d)
+        return
+    uid, _, chat = who()
+    t = paper.modify(d["edit_id"], uid, chat, telegram_chat_id(), stop=d["sl"], target=v)
+    state.set_draft(key, None)
+    state.set_wait(key, None)
+    telegram.send_text(f"✏️ <b>#{t['id']} updated</b> · 🛑 {paper._fmt(t['stop'], t['currency'])} · "
+                       f"🎯 {paper._fmt(t['target'], t['currency'])}", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
 
 
 def paper_exit(trade_id: int) -> None:
     uid, _, chat = who()
     t = paper.exit_trade(trade_id, uid, chat, telegram_chat_id())
+    from bot import risk
     icon = "🟢" if t["pnl"] >= 0 else "🔴"
+    roe = f" · on margin {t['roe']:+.1f}%" if t.get("roe") is not None and t.get("lev") else ""
     telegram.send_text(f"{icon} <b>Paper trade #{t['id']} closed</b> · {html.escape(t['pretty'])} {t['side']}\n"
-                       f"Entry {t['entry']:,.6g} → exit {t['exit']:,.6g} = <b>{t['pnl_pct']:+.2f}%</b> "
-                       f"({'+' if t['pnl'] >= 0 else '−'}{abs(t['pnl']):,.2f} {t['currency']})"
+                       f"Entry {paper._fmt(t['entry'], t['currency'])} → exit {paper._fmt(t['exit'], t['currency'])}\n"
+                       f"<b>{risk.money(t['pnl'], t['currency'], True)}</b> · price {t['pnl_pct']:+.2f}%{roe}"
                        + (f" · {t['r']:+.2f}R" if t.get("r") is not None else ""),
                        buttons=[[("💼 My paper trades", "pt:l"), ("📜 History", "pt:h")], [HOME]])
 
 
 def paper_callback(rest: str, message_id: int | None) -> None:
     sub, _, val = rest.partition(":")
+    uid, name, chat = who()
     if sub == "l":
         paper_status(message_id)
     elif sub == "h":
-        uid, name, chat = who()
         telegram.send_text(paper.history_text(paper.closed_trades(chat, uid), name),
                            buttons=[[("💼 My paper trades", "pt:l"), HOME]])
     elif sub == "bd":
-        _, _, chat = who()
         telegram.send_text(paper.board_text(chat), buttons=[[("💼 My paper trades", "pt:l"), HOME]])
     elif sub == "x" and val.isdigit():
         paper_exit(int(val))
-    elif sub in ("o", "b", "s"):
+    elif sub == "n" and val.isdigit():
+        t = paper.cancel_order(int(val), uid, chat, telegram_chat_id())
+        telegram.send_text(f"🚫 Pending order #{t['id']} {html.escape(t['pretty'])} cancelled.",
+                           buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    elif sub == "e" and val.isdigit():
+        paper_edit_start(int(val))
+    elif sub == "v":
+        paper_input(val)
+    elif sub == "g":                       # change one field from the confirm screen
+        d = state.draft(key_of(None))
+        if d:
+            d["step"], d["edit_back"] = ("size" if val == "qty" else val), True
+            state.set_draft(key_of(None), d)
+        paper_step()
+    elif sub == "k":
+        paper_confirm()
+    elif sub == "q":
+        state.set_draft(key_of(None), None)
+        state.set_wait(key_of(None), None)
+        telegram.send_text("✖ Paper ticket cancelled.", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    elif sub in ("o", "b", "s", "r", "c"):
+        if sub in ("r", "c"):
+            side_code, _, val = val.partition(":")
+        else:
+            side_code = sub                # older buttons: pt:b / pt:s = bot levels
         code, _, rest2 = val.partition(":")
         sym, _, tf = rest2.partition(":")
         market = report.CODE_MARKET.get(code, "crypto")
@@ -638,7 +779,7 @@ def paper_callback(rest: str, message_id: int | None) -> None:
         if sub == "o":
             paper_ticket(market, sym, tf)
         else:
-            paper_open(market, sym, tf, "BUY" if sub == "b" else "SELL")
+            paper_start(market, sym, tf, "BUY" if side_code == "b" else "SELL", recommended=sub != "c")
 
 
 def cmd_paper(args: list[str]) -> None:
@@ -649,21 +790,21 @@ def cmd_paper(args: list[str]) -> None:
     if act in ("buy", "sell") and len(args) >= 2:
         rest, tf = split_tf(args[1:])
         sym, market = report.resolve(rest[0])
-        qty = float(rest[1]) if len(rest) > 1 and rest[1].replace(".", "", 1).isdigit() else None
         try:
             a = report.analyze(sym, market, tf=tf)
         except data.DataError:
             if market != "crypto":
                 raise
             a = report.analyze(sym, "stock", tf=tf)
-        paper_open(a.market, a.symbol, a.timeframe, act.upper(), qty)
+        paper_start(a.market, a.symbol, a.timeframe, act.upper(), recommended=False)
     elif act in ("history", "h"):
         paper_callback("h", None)
     elif act in ("board", "leaderboard"):
         paper_callback("bd", None)
     else:
-        telegram.send_text("Use <code>/paper</code> (status), <code>/paper buy ETH</code>, "
-                           "<code>/paper sell RELIANCE 10 15m</code>, <code>/exit 3</code>.", buttons=[[HOME]])
+        telegram.send_text("Use <code>/paper</code> (status) or <code>/paper buy ETH</code> / "
+                           "<code>/paper sell RELIANCE 15m</code> to open a ticket; <code>/exit 3</code> closes #3.",
+                           buttons=[[HOME]])
 
 
 # ---------------------------------------------------------------- news
@@ -773,8 +914,9 @@ def cmd_strategies() -> None:
                  "⚖️ pairs trading → /pairs")
     lines.append(f"\nStops from ATR, swings or the level; default take profit = {r['target_r']:g}× the risk.\n"
                  "🟢/🔴 ready = all 3 conditions met · 🟡 forming = 2 of 3 · ➖ not for this chart.\n"
-                 f"Risk rules: {r['risk_per_trade_pct']}% per trade · stop after "
-                 f"{r.get('max_losing_trades_per_day', 3)} losing trades or {r.get('max_daily_loss_pct', 2)}% loss a day.\n"
+                 f"Risk ladder: ${', $'.join(str(x) for x in r['ladder_usd'])} · "
+                 f"₹{', ₹'.join(f'{x:,}' for x in r['ladder_inr'])} per trade · stop after "
+                 f"{r.get('max_losing_trades_per_day', 3)} losing trades a day.\n"
                  "<i>Win rates quoted online are backtest ranges, not guarantees. Expectancy = win% × avg win − "
                  "loss% × avg loss: check each strategy's own history line.</i>")
     telegram.send_text("\n".join(lines), buttons=[[HOME]])
@@ -786,9 +928,9 @@ def cmd_settings() -> None:
     groups = sorted(allowed_chats() - {telegram_chat_id()} | approved_groups())
     telegram.send_text(
         "⚙️ <b>SETTINGS</b> (edit config.json on GitHub to change)\n"
-        f"💰 Capital: ₹{r['capital_inr']:,} (NSE/MCX) · {r['capital_usdt']:,} USDT (crypto) · "
-        f"{r.get('capital_usd', r['capital_usdt']):,} USD (forex)\n"
-        f"🛡 Risk per trade: {r['risk_per_trade_pct']}% · take profit {r['target_r']:g}R\n"
+        f"🪜 Risk ladder per trade: ${' · $'.join(str(x) for x in r['ladder_usd'])} (crypto, forex) · "
+        f"₹{' · ₹'.join(f'{x:,}' for x in r['ladder_inr'])} (NSE, MCX)\n"
+        f"🎯 Default take profit {r['target_r']:g}R · daily stop after {r.get('max_losing_trades_per_day', 3)} losses\n"
         f"⏱ Default timeframes: crypto {report.default_tf('crypto')} · NSE {report.default_tf('stock')} · "
         f"forex {report.default_tf('fx')}\n"
         f"🪙 Crypto: top {c['crypto']['top_n_by_volume']} by volume + {', '.join(c['crypto']['always_include'])}\n"
@@ -889,6 +1031,9 @@ def handle(text: str, chat_id: str | None = None) -> None:
             deliver(report.analyze_any(rest[0], tf))
         else:
             telegram.send_text("Which one? Example: <code>/analyze ETH 15m</code> or just send <code>ETH</code>.")
+    elif not cmd.startswith("/") and state.wait_mode(key) == "pt":
+        state.take_wait(key)
+        paper_input(raw)                       # a number typed into the paper-trade ticket
     elif len(parts) == 1 and cmd.isdigit():
         pick_number(chat_id, int(cmd))
     elif cmd.startswith("/"):
@@ -896,7 +1041,9 @@ def handle(text: str, chat_id: str | None = None) -> None:
     else:
         mode = state.take_wait(key)
         rest, tf = split_tf(parts)
-        if mode:
+        if mode == "pt":
+            paper_input(raw)
+        elif mode:
             open_stock(" ".join(rest) or raw, mode, tf)
         elif len(rest) == 1 and _looks_like_symbol(rest[0]):
             quick_symbol(rest[0], tf)
@@ -1204,12 +1351,18 @@ def check_paper_all() -> None:
         except Exception as exc:
             log.info("Paper check %s: %s", chat, exc)
             continue
+        from bot import risk
         for c in closed:
-            icon = "🎯" if c["reason"].startswith("target") else "🛑"
             mention = f"<a href=\"tg://user?id={c['user_id']}\">{html.escape(c['user_name'])}</a>"
-            telegram.send_text(f"{icon} {mention}: paper trade #{c['id']} {html.escape(c['pretty'])} {c['side']} — "
-                               f"{c['reason']} at {c['exit']:,.6g} → <b>{c['pnl_pct']:+.2f}%</b>", chat,
-                               buttons=[[("💼 Paper trades", "pt:l")]])
+            if c["status"] == "open":
+                text = (f"✅ {mention}: paper order #{c['id']} {html.escape(c['pretty'])} {c['side']} filled at "
+                        f"{c['entry']:,.6g}")
+            else:
+                icon = {"target hit": "🎯", "liquidated": "💀"}.get(c["reason"], "🛑")
+                text = (f"{icon} {mention}: paper trade #{c['id']} {html.escape(c['pretty'])} {c['side']} — "
+                        f"{c['reason']} at {c['exit']:,.6g} → <b>{risk.money(c['pnl'], c['currency'], True)}</b> "
+                        f"({c['pnl_pct']:+.2f}%)")
+            telegram.send_text(text, chat, buttons=[[("💼 Paper trades", "pt:l")]])
 
 
 def run_local(with_alerts: bool = True, max_loops: int | None = None) -> None:

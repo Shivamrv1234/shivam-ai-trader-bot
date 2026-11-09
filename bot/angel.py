@@ -18,6 +18,7 @@ Response field names behind Angel One's login are read with fallbacks (see pick(
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -203,24 +204,100 @@ def derivatives(inst: pd.DataFrame, name: str, today: date | None = None) -> tup
 
 # ---------------------------------------------------------------- session
 
+# Minimum seconds between two calls of one kind. Angel One allows about 3 candle requests a second
+# (180 a minute), 10 quote requests a second and 1 a second for option Greeks / OI build-up. When it is
+# asked faster it answers with an HTML "access denied" page, which the SDK reports as DataException.
+SPACING = {"candles": 0.4, "quote": 0.25, "greeks": 1.1, "buildup": 1.1, "oi": 0.5, "login": 1.0}
+_call_lock = threading.Lock()
+_last_call: dict[str, float] = {}
+
+
+def _throttle(kind: str) -> None:
+    gap = SPACING.get(kind, 0.4)
+    wait = _last_call.get(kind, 0.0) + gap - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last_call[kind] = time.monotonic()
+
+
+def _busy(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in ("access rate", "rate limit", "too many", "couldn't parse", "exceeding",
+                                "unknown content-type", "timed out", "timeout", "connection", "temporarily"))
+
+
+def _expired(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in ("invalid token", "token expired", "tokenexception", "ag8001", "ag8002", "ag8003",
+                                "unauthorized"))
+
+
 class Angel:
     def __init__(self) -> None:
         if not configured():
             raise AngelError("Angel One secrets are not set (ANGEL_API_KEY, ANGEL_CLIENT_CODE, "
                              "ANGEL_PIN, ANGEL_TOTP_SECRET)")
-        import pyotp
         from SmartApi import SmartConnect
 
         self.api = SmartConnect(api_key=secret("ANGEL_API_KEY"))
-        try:
-            totp = pyotp.TOTP(secret("ANGEL_TOTP_SECRET").replace(" ", "")).now()
-        except Exception:
-            raise AngelError("ANGEL_TOTP_SECRET is not a valid TOTP secret (copy the text key, not the QR)") from None
-        resp = self.api.generateSession(secret("ANGEL_CLIENT_CODE"), secret("ANGEL_PIN"), totp)
-        if not resp or not resp.get("status"):
-            raise AngelError(f"Angel One login failed: {(resp or {}).get('message', 'no response')}")
         self._inst: pd.DataFrame | None = None
         self.last_keys: dict[str, list] = {}
+        self._cache: dict = {}
+        self._login()
+
+    def _login(self) -> None:
+        import pyotp
+
+        try:
+            totp_obj = pyotp.TOTP(secret("ANGEL_TOTP_SECRET").replace(" ", ""))
+            totp_obj.now()
+        except Exception:
+            raise AngelError("ANGEL_TOTP_SECRET is not a valid TOTP secret (copy the text key, not the QR)") from None
+        last = "no response"
+        for attempt in range(3):
+            with _call_lock:
+                _throttle("login")
+                try:
+                    resp = self.api.generateSession(secret("ANGEL_CLIENT_CODE"), secret("ANGEL_PIN"), totp_obj.now())
+                except Exception as exc:  # SDK DataException when Angel One is busy
+                    resp, last = None, f"{exc.__class__.__name__}: {str(exc)[:100]}"
+            if resp and resp.get("status"):
+                return
+            if resp:
+                last = resp.get("message", last)
+                if not _busy(str(last)):
+                    break
+            time.sleep(1.5 * (attempt + 1))
+        raise AngelError(f"Angel One login failed: {last}")
+
+    def call(self, kind: str, what: str, fn, *args):
+        """Every SmartAPI request goes through here: spaced to Angel One's rate limits, retried when Angel One
+        is busy (it then returns a non-JSON page -> SDK DataException), and logged in again if the session
+        expired. Always raises AngelError (never an SDK exception) when it finally fails."""
+        last = ""
+        for attempt in range(4):
+            with _call_lock:
+                _throttle(kind)
+                try:
+                    resp = fn(*args)
+                    err = None
+                except Exception as exc:
+                    resp, err = None, f"{exc.__class__.__name__}: {str(exc)[:160]}"
+            if err is None and resp and resp.get("status"):
+                return resp.get("data")
+            text = err or str((resp or {}).get("message") or (resp or {}).get("errorcode") or "no response")
+            last = text
+            if _expired(text) or (resp and str(resp.get("errorcode", "")).startswith("AG80")):
+                log.info("Angel One session expired; logging in again")
+                self._login()
+                continue
+            if err is None and not _busy(text):
+                break                      # a real answer like "invalid symbol": retrying won't help
+            log.warning("%s: Angel One busy (%s); retry %d", what, text[:80], attempt + 1)
+            time.sleep(0.8 * (attempt + 1))
+        if _busy(last):
+            raise AngelError(f"{what}: Angel One is busy right now (rate limit). Try again in a minute.")
+        raise AngelError(f"{what}: {last}")
 
     @property
     def inst(self) -> pd.DataFrame:
@@ -234,33 +311,57 @@ class Angel:
         return resp.get("data")
 
     def candles(self, token: str, exchange: str = "NSE", interval: str = "ONE_DAY", days: int = 700) -> pd.DataFrame:
+        """Candles, cached briefly so several screens in a row (chart, F&O, VIX...) don't re-ask Angel One."""
+        key = (token, exchange, interval, days)
+        ttl = 120 if interval == "ONE_DAY" else 30
+        cache = self.__dict__.setdefault("_cache", {})
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1].copy()
         to_dt = datetime.now(IST)
         params = {"exchange": exchange, "symboltoken": token, "interval": interval,
                   "fromdate": (to_dt - timedelta(days=days)).strftime("%Y-%m-%d 00:00"),
                   "todate": to_dt.strftime("%Y-%m-%d %H:%M")}
-        rows = self._ok(self.api.getCandleData(params), "Candles")
+        rows = self.call("candles", "Candles", self.api.getCandleData, params)
         if not rows:
             raise AngelError("Candles: empty response")
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
         df.index = pd.to_datetime(df.pop("ts"), utc=True)
-        return df.astype(float).sort_index()
+        df = df.astype(float).sort_index()
+        cache[key] = (time.time(), df)
+        return df.copy()
 
     def quotes(self, tokens: dict[str, list[str]]) -> list[dict]:
         out = []
         for exch, toks in tokens.items():
             for i in range(0, len(toks), QUOTE_BATCH):
-                data = self._ok(self.api.getMarketData("FULL", {exch: toks[i:i + QUOTE_BATCH]}), "Quote")
+                data = self.call("quote", "Quote", self.api.getMarketData, "FULL", {exch: toks[i:i + QUOTE_BATCH]})
                 fetched = (data or {}).get("fetched") or []
                 if fetched:
                     self.last_keys["quote"] = sorted(fetched[0].keys())
                 out += fetched
-                time.sleep(1.1)  # stay under Angel One's rate limit
+        return out
+
+    def ltp_many(self, names: list[str]) -> dict[str, dict]:
+        """Live quotes for many NSE symbols in one request (scanner lists)."""
+        toks = {}
+        for n in names:
+            try:
+                u = find_underlying(self.inst, n)
+                toks[str(u.spot_token)] = n.upper()
+            except AngelError:
+                continue
+        out = {}
+        for q in self.quotes({"NSE": list(toks)}) if toks else []:
+            name = toks.get(str(pick(q, "symbolToken", "token", default="")))
+            if name:
+                out[name] = q
         return out
 
     def greeks(self, name: str, expiry: date) -> list[dict]:
         params = {"name": name.upper(), "expirydate": expiry.strftime("%d%b%Y").upper()}
         try:
-            data = self._ok(self.api.optionGreek(params), "Option Greeks")
+            data = self.call("greeks", "Option Greeks", self.api.optionGreek, params)
         except AngelError as exc:
             log.warning("%s", exc)
             return []
@@ -275,7 +376,8 @@ class Angel:
         out = {}
         for kind in BUILDUP_TYPES:
             try:
-                rows = self._ok(self.api.oIBuildup({"expirytype": expirytype, "datatype": kind}), f"OI build-up {kind}")
+                rows = self.call("buildup", f"OI build-up {kind}", self.api.oIBuildup,
+                                 {"expirytype": expirytype, "datatype": kind})
             except AngelError as exc:
                 log.warning("%s", exc)
                 continue
@@ -291,7 +393,6 @@ class Angel:
                     out.setdefault("#" + tok, (kind, r))
             if rows and isinstance(rows, list):
                 self.last_keys["oi_buildup"] = sorted(rows[0].keys())
-            time.sleep(1.1)  # Angel One rate limit
         return out
 
     def oi_history(self, token: str, exchange: str = "NFO", days: int = 90) -> pd.Series | None:
@@ -301,7 +402,7 @@ class Angel:
                   "fromdate": (to_dt - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
                   "todate": to_dt.strftime("%Y-%m-%d %H:%M")}
         try:
-            rows = self._ok(self.api.getOIData(params), "OI history")
+            rows = self.call("oi", "OI history", self.api.getOIData, params)
         except Exception as exc:
             log.warning("OI history unavailable: %s", exc)
             return None
@@ -643,10 +744,10 @@ def market_buildup(a: Angel, expirytype: str = "NEAR", top: int = 5) -> dict[str
     out = {}
     for kind in BUILDUP_TYPES:
         try:
-            rows = a._ok(a.api.oIBuildup({"expirytype": expirytype, "datatype": kind}), f"OI build-up {kind}")
+            rows = a.call("buildup", f"OI build-up {kind}", a.api.oIBuildup,
+                          {"expirytype": expirytype, "datatype": kind})
         except AngelError as exc:
             log.warning("%s", exc)
             rows = []
         out[kind] = [r for r in (rows if isinstance(rows, list) else [])][:top]
-        time.sleep(1.1)  # Angel One rate limit
     return out

@@ -210,7 +210,7 @@ def resample_nse_4h(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_index()
 
 
-def stock_candles(symbol: str, timeframe: str = "1d") -> pd.DataFrame:
+def stock_candles(symbol: str, timeframe: str = "1d", live: bool = True) -> pd.DataFrame:
     """NSE candles (stocks or indices such as NIFTY / BANKNIFTY) for any timeframe.
     Angel One (official, live) when its secrets are set; otherwise Yahoo (delayed).
     df.attrs carries 'source', 'live_price' and 'live_change_pct'."""
@@ -224,9 +224,16 @@ def stock_candles(symbol: str, timeframe: str = "1d") -> pd.DataFrame:
         try:
             a = angel.session()
             hist = a.spot_candles(sym, interval, days)
-            q = a.ltp(sym)
+            q = a.ltp(sym) if live else {}   # scanners fetch all live prices in one request instead
         except angel.AngelError as exc:
-            raise DataError(f"Angel One {sym}: {exc}") from None
+            # Angel One busy / down: fall back to Yahoo (delayed) rather than show an error.
+            try:
+                hist = _yahoo_nse(sym, tf, venue)
+            except DataError:
+                raise DataError(f"Angel One {sym}: {exc}") from None
+            why = "Angel One busy" if "busy" in str(exc) else "Angel One unavailable"
+            hist.attrs["source"] = f"Yahoo (delayed ~15 min — {why})"
+            return hist
         if tf == "4h":
             hist = resample_nse_4h(hist)
         hist = drop_forming(hist, tf, (15, 30), "Asia/Kolkata")
@@ -235,6 +242,12 @@ def stock_candles(symbol: str, timeframe: str = "1d") -> pd.DataFrame:
                           live_change_pct=angel.num(angel.pick(q, "percentChange")),
                           tf=tf, tz="Asia/Kolkata", venue=venue, currency="INR")
         return hist
+    return _yahoo_nse(sym, tf, venue)
+
+
+def _yahoo_nse(sym: str, tf: str, venue: str) -> pd.DataFrame:
+    from bot import angel
+
     ticker = angel.YAHOO_INDEX.get(sym, f"{sym}.NS")
     hist = yahoo_candles(ticker, tf, sym)
     hist = drop_forming(hist, tf, (15, 30), "Asia/Kolkata")

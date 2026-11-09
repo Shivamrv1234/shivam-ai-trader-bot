@@ -99,6 +99,14 @@ def pick(chat_id: str, number: int) -> tuple[str, str, str | None] | None:
     return entry["market"], entry["symbols"][number - 1], entry.get("tf")
 
 
+def wait_mode(chat_id: str) -> str | None:
+    """The pending menu question for this user (without using it up)."""
+    entry = load().get("wait", {}).get(str(chat_id))
+    if entry and time.time() - entry.get("ts", 0) <= WAIT_SECONDS:
+        return entry.get("mode")
+    return None
+
+
 def pending_wait(chat_id: str) -> bool:
     """A menu question is waiting for this user's answer (doesn't use it up)."""
     entry = load().get("wait", {}).get(str(chat_id))
@@ -111,3 +119,22 @@ def recent_list(chat_id: str, seconds: int = WAIT_SECONDS) -> bool:
     ts = max(st.get("lists", {}).get(str(chat_id), {}).get("ts", 0),
              st.get("news", {}).get(str(chat_id), {}).get("ts", 0))
     return time.time() - ts <= seconds
+
+
+# ---------------------------------------------------------------- paper-trade ticket being filled in
+
+def set_draft(chat_id: str, draft: dict | None) -> None:
+    st = load()
+    drafts = st.setdefault("drafts", {})
+    if draft is None:
+        drafts.pop(str(chat_id), None)
+    else:
+        drafts[str(chat_id)] = {**draft, "ts": int(time.time())}
+    save(st)
+
+
+def draft(chat_id: str) -> dict | None:
+    d = load().get("drafts", {}).get(str(chat_id))
+    if d and time.time() - d.get("ts", 0) <= 30 * 60:
+        return d
+    return None

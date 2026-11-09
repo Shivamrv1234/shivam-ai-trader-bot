@@ -11,7 +11,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from bot import angel  # noqa: E402
-from bot.config import capital  # noqa: E402
 
 IST = angel.IST
 
@@ -86,7 +85,6 @@ def summary_text(s: angel.FnoSnapshot) -> str:
     ce_max, pe_max = s.max_oi("CE"), s.max_oi("PE")
     atm_ce = next((l for l in s.side("CE") if l.strike == s.atm), None)
     atm_pe = next((l for l in s.side("PE") if l.strike == s.atm), None)
-    cap, _ = capital("stock")
     lines = [
         f"📊 <b>{html.escape(s.name)} · F&amp;O REPORT</b>",
         f"<i>{s.fetched_at} · {status} · Angel One</i>",
@@ -122,10 +120,9 @@ def summary_text(s: angel.FnoSnapshot) -> str:
             if leg.theta is not None:
                 greeks.append(f"theta {leg.theta:.2f}/day")
             per_lot = leg.ltp * s.lot
-            afford = "fits" if per_lot and per_lot <= cap else "exceeds"
             lines.append(f"• ATM {leg.strike:,.0f} {leg.kind}: ₹{_n(leg.ltp)} · "
                          + (", ".join(greeks) + " · " if greeks else "")
-                         + f"1 lot ≈ ₹{_n(per_lot, 0)} ({afford} your ₹{cap:,.0f} capital)")
+                         + f"1 lot ≈ ₹{_n(per_lot, 0)}")
     if not any(l.iv is not None for l in s.legs):
         lines.append("• Greeks unavailable right now (Angel One returns them during market hours)")
     lines.append("")
@@ -153,14 +150,12 @@ def option_idea(s: angel.FnoSnapshot, a) -> str:
     at_tp = leg.ltp + delta * move_tp
     at_sl = max(leg.ltp - delta * move_sl, 0.05)
     cost = leg.ltp * s.lot
-    cap, _ = capital("stock")
     days = max((s.expiry - datetime.now(IST).date()).days, 0)
     pre = "If it triggers: " if a.direction == "FORMING" else ""
     lines = [head, "━━━━━━━━━━━━━━━━━━",
              f"{pre}{'🟢' if kind == 'CE' else '🔴'} <b>BUY {html.escape(s.name)} {s.atm:,.0f} {kind}</b> "
              f"(expiry {s.expiry:%d %b}, {days} days)",
-             f"💵 Premium ₹{_n(leg.ltp)} × lot {s.lot} = <b>₹{cost:,.0f}</b> "
-             f"({cost / cap * 100:.0f}% of your ₹{cap:,.0f})",
+             f"💵 Premium ₹{_n(leg.ltp)} × lot {s.lot} = <b>₹{cost:,.0f}</b> per lot",
              f"💰 If {html.escape(s.name)} reaches take profit {_n(best.target)}: premium ≈ ₹{_n(at_tp)} "
              f"(≈ {_rs((at_tp - leg.ltp) * s.lot)} per lot)",
              f"🛑 If it hits the stop {_n(best.stop)}: premium ≈ ₹{_n(at_sl)} → exit "
@@ -172,6 +167,8 @@ def option_idea(s: angel.FnoSnapshot, a) -> str:
                  + "; it ignores time decay and IV changes, so real premiums will differ.")
     if days <= 2:
         lines.append("⚠️ Expiry is very close: premiums can collapse within hours.")
+    from bot import risk
+    lines.append(risk.fits_text(cost, "INR").replace("Max loss", "Worst-case loss"))
     lines.append("<i>Options can lose 100% of the premium quickly. Paper-trade first; not financial advice.</i>")
     return "\n".join(lines)
 
@@ -194,5 +191,7 @@ def mapping_text(verdict_line: str, bullish: list[str], bearish: list[str] | Non
         lines.append("⚪ No BUY or SELL setup on the underlying right now, so there's no directional F&amp;O idea.")
     else:
         lines.append("Use the underlying's stop-loss from the chart analysis as your exit level.")
+    from bot import risk
+    lines.append(risk.fits_text(cost, "INR").replace("Max loss", "Worst-case loss"))
     lines.append("<i>Options can lose 100% of the premium quickly. Paper-trade first; not financial advice.</i>")
     return "\n\n".join(lines)

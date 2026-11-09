@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from bot import angel, greeks  # noqa: E402
-from bot.config import capital, cfg  # noqa: E402
+from bot.config import cfg  # noqa: E402
 
 IST = angel.IST
 LINE = "━━━━━━━━━━━━━━━━━━"
@@ -352,7 +352,6 @@ def _rs(v: float | None) -> str:
 
 
 def plan_text(p: Plan, snap, recommended: bool = False) -> str:
-    cap, _ = capital("stock")
     lines = [("⭐ <b>RECOMMENDED PLAN</b>\n" if recommended else "") + f"<b>{html.escape(p.title)}</b>",
              f"<i>{snap.name} spot {snap.spot:,.2f} · expiry {snap.expiry:%d %b} ({p.days} days) · lot {snap.lot} · "
              f"{snap.fetched_at}</i>", LINE]
@@ -381,9 +380,8 @@ def plan_text(p: Plan, snap, recommended: bool = False) -> str:
         lines.append(f"🧮 Position Greeks per lot: Δ {g['delta']:+.1f} · Γ {g['gamma']:+.3f} · "
                      f"Θ ₹{g['theta']:+,.0f}/day · vega ₹{g['vega']:+,.0f} per 1% IV")
     if ml is not None:
-        pct = abs(ml) / cap * 100
-        lines.append(("✅" if pct <= 10 else "⚠️") + f" Max loss = {pct:.0f}% of your ₹{cap:,.0f} capital"
-                     + ("" if pct <= 10 else " — too big for one trade; paper-trade it or skip"))
+        from bot import risk
+        lines.append(risk.fits_text(abs(ml), "INR") + " (per lot)")
     else:
         lines.append("⚠️ Unlimited risk on one side — only with a strict stop.")
     if any(l.action == "SELL" for l in p.legs):

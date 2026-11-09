@@ -80,17 +80,6 @@ def cost_pct_side(market: str) -> tuple[float, float]:
     return _fee_pct(market) / 100, cfg()["costs"]["slippage_pct"] / 100
 
 
-def capital(market: str, currency: str | None = None) -> tuple[float, str]:
-    """Paper capital and its currency: INR for NSE and Indian MCX/currency futures, USDT for crypto,
-    USD for global forex and commodities."""
-    r = cfg()["risk"]
-    if currency == "INR" or market in ("stock", "mcx"):
-        return r["capital_inr"], "INR"
-    if market == "crypto":
-        return r["capital_usdt"], "USDT"
-    return r.get("capital_usd", r["capital_usdt"]), "USD"
-
-
 def allowed_chats() -> set[str]:
     """Chats the bot answers: your own chat plus approved group IDs (ALLOWED_CHATS, comma separated)."""
     ids = {telegram_chat_id()} | {c.strip() for c in secret("ALLOWED_CHATS").split(",") if c.strip()}
