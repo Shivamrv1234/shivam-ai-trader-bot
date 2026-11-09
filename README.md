@@ -1,8 +1,5 @@
 # SHIVAM AI TRADER — Telegram bot for crypto, NSE, F&O, forex & commodities
 
-# [SETUP Guide](https://drive.google.com/file/d/1X_St2LjzHTm-xF8KKIf1y4MrmUnkOgVK/view?usp=sharing)
-# [Bot Features](https://drive.google.com/file/d/1o6NrhzLhjkx_gkkAk07aRCaaFQYsjND-/view?usp=sharing)
-
 Telegram is where you see alerts, ask questions and paper-trade. The analysis runs on **GitHub Actions**
 (alerts), **Google Cloud Run** (instant replies) or **your own Windows PC** (`start_bot.bat`). The bot reads
 data only: it has **no code that can place orders** with any broker.
@@ -16,7 +13,7 @@ data only: it has **no code that can place orders** with any broker.
    🟢 BUY · 🔴 SELL · ⚖️ mixed · 🟡 forming · ⚪ none. **Tap a number** (or send it).
 3. For any asset you get two clean messages:
    - ① **Chart + trade card:** 💹 live price, BUY/SELL, 🎯 entry, 💰 take profit, 🛑 stop-loss,
-     reward:risk, size for your capital, 🌡 **India VIX** with its good/bad reading (Indian assets)
+     reward:risk, a **risk ladder** ($10 / $25 / $50 / $100 → size → reward), 🌡 **India VIX** with its good/bad reading (Indian assets)
    - ② **Strategy check:** all **14 strategies** numbered with 🟢 BUY / 🔴 SELL / 🟡 forming / ⚪ none /
      ➖ not for this chart, the market regime (trending/ranging) and the verdict
 4. Buttons under the strategy check:
@@ -95,13 +92,33 @@ use a free Twelve Data key for live forex.
 
 ## Paper trading
 
-Tap **📝 Paper trade** under any analysis → **🟢 Paper BUY** or **🔴 Paper SELL**. The trade opens at the
-live price with the setup's stop and target (or 1.5 ATR / 2R), sized by your risk setting. **💼 Paper
-trades** shows every open trade with live price, P&L in % and money, R multiple, distance to stop and
-target, and an **❌ Exit** button. Stops and targets hit while you were away are detected from 5-minute
-candles. **📜 History** shows win rate and totals; **🏆 Board** ranks group members. It warns after
-3 losing trades or a 2% loss in a day. Trades are saved in Google Cloud Storage on Cloud Run (the deploy
-script creates the bucket), in `.state/store.json` on your PC, and in the workflow cache on GitHub.
+Tap **📝 Paper trade** under any analysis. You see the bot's suggested entry, stop-loss and target for BUY
+and SELL, and the risk ladder. Then:
+- **🤖 bot levels**: keep the bot's levels and only choose the size and leverage, or
+- **✍️ my own**: a 5-step ticket.
+  ① **entry** (⚡ market, the bot's price, or type one — below/above the live price becomes a pending
+  **limit / stop order**)
+  ② **capital or quantity**: type a quantity / lots (`0.05`, `2`), or the **capital** with a currency sign
+  (`$200`, `₹10000`) or tap 💼 $50–$500 / ₹5,000–₹50,000, or 🪜 size from risk ($10–$100 after the stop)
+  ③ **leverage** (crypto 1x–20x, forex 1:10–1:500, stocks 1x delivery / 5x intraday; futures lots use
+  exchange margin). Each button previews the result: with a quantity it shows the **capital used**
+  (`5x → $46`), with capital it shows the **quantity bought/sold** (`10x → 20 SOL`)
+  ④ **stop-loss** as a **price** (bot, 1/1.5/2 ATR, or type) **or a money loss** (`$25`, `₹2000`, or the
+  −$10…−$100 buttons → the bot converts it to a price)
+  ⑤ **take profit** as a **price** (bot, 1:1.5/1:2/1:3, or type) **or a money profit** (`$100`, `₹5000`).
+- **Confirm** shows the order, stop/target with % and money, quantity (or "capital entered $200 × 10x →
+  BUY 20 SOL"), **capital used** and position value, R:R, % on capital, crypto liquidation price and
+  warnings. ✏️ Entry / Size / SL / TP change one field and come straight back (a new entry that puts the old
+  stop or target on the wrong side asks for it again).
+
+**💼 Paper trades** lists open positions and pending orders with live price, P&L in money, % price move,
+% on margin, R multiple, distance to stop/target and liquidation, with **❌ Exit**, **✏️ SL/TP** and
+**🚫 Cancel** buttons. Fills, stops, targets and liquidations are detected from 5-minute candles.
+**📜 History** and **🏆 Board** (groups) as before; warning after 3 losing trades or $100 / ₹8,500 lost in a day.
+
+**No fixed capital any more.** Every setup shows a **risk ladder**: what risking $10, $25, $50 or $100
+(₹1,000 / ₹2,000 / ₹4,000 / ₹8,500 for Indian assets) means in shares, coins or lots, and the reward at
+the target. Change the amounts in `config.json` (`risk.ladder_usd`, `risk.ladder_inr`).
 
 ---
 
@@ -180,7 +197,7 @@ workflow**, type a command such as `/analyze SOL`, and run it. The result reache
 
 ### 7. Change settings
 Open `config.json` in the repo, click the pencil icon, edit, **Commit changes**. You can change:
-capital (`capital_inr`, `capital_usdt`), `risk_per_trade_pct`, `target_r`, how many coins to scan,
+risk ladder (`ladder_usd`, `ladder_inr`), `target_r`, how many coins to scan,
 coins always included, and the NSE stock watchlist.
 
 ---

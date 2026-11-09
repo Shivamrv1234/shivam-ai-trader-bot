@@ -1,4 +1,32 @@
-# SHIVAM AI TRADER — Upgrade guide (8 Nov 2026)
+# SHIVAM AI TRADER — Upgrade guide (9 Nov 2026)
+
+## Update of 9 Nov 2026
+
+1. **Fix for "Something went wrong (DataException)" in live market.** Angel One answers with an "access
+   denied" page when it is asked too fast, and its SDK crashed on it. Now every Angel One call is spaced to
+   its limits, retried when Angel One is busy, logged in again if the session expires, and the NSE scanner
+   fetches all live prices in **one** request. Candles are cached for a short time so the chart, F&O and
+   VIX screens don't ask twice.
+2. **Paper trading ticket:** your own entry (market, limit or stop order), stop-loss, take profit, size and
+   leverage, with the bot's suggestions as buttons; confirm screen with risk, reward, margin, liquidation;
+   pending orders; ✏️ move SL/TP; 🚫 cancel.
+3. **Risk ladder instead of capital:** $10 / $25 / $50 / $100 (₹1,000 / ₹2,000 / ₹4,000 / ₹8,500)
+   → size → reward on every card, ticket and plan. The ₹15,000 / $100 capital settings are gone.
+
+4. **Paper ticket v2 — capital, money stop and money target.** Size the trade by **capital** (`$200`,
+   `₹10000` or 💼 buttons) and the bot works out the quantity after leverage, or by **quantity / lots** and
+   the bot shows the **capital used**. Stop-loss and take profit can be a **price or a money amount**
+   (`$25` loss, `₹5000` profit). Steps: entry → capital/quantity → leverage → stop-loss → take profit.
+5. **NSE data without errors:** when Angel One is busy or down, stock and index charts fall back to Yahoo
+   (labelled "delayed ~15 min — Angel One busy") instead of showing an error. The NSE website itself is not
+   used: its terms forbid automated data collection, its robots.txt blocks `/api/`, and it blocks cloud
+   servers such as Cloud Run.
+
+Update the same way as before (part A, then part B or C below). 124 offline tests.
+
+---
+
+## Earlier update (8 Nov 2026)
 
 This zip has everything in one folder:
 - the full project, to patch your GitHub repository;

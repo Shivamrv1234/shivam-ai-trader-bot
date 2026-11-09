@@ -43,13 +43,20 @@
     "timeframe": "1d"
   },
   "risk": {
-    "capital_inr": 15000,
-    "capital_usdt": 100,
-    "risk_per_trade_pct": 0.5,
     "target_r": 2.0,
-    "capital_usd": 100,
     "max_losing_trades_per_day": 3,
-    "max_daily_loss_pct": 2.0
+    "ladder_usd": [
+      10,
+      25,
+      50,
+      100
+    ],
+    "ladder_inr": [
+      1000,
+      2000,
+      4000,
+      8500
+    ]
   },
   "costs": {
     "crypto_pct_per_side": 0.1,
