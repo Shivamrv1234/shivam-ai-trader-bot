@@ -184,11 +184,11 @@ def test_full_report_text_and_chart(sent):
 def test_stock_position_size_in_shares():
     a = report.analyze("RELIANCE", "stock", candles=candles(500, freq="D", start=1400))
     s = strategies.Setup("k", "n", "i", "TRADE", entry=1400.0, stop=1372.0, target=1456.0)
-    line = report.position_size(s, "stock")
-    # 15000 * 0.5% = 75 INR risk; unit = 28 + 1400*0.2%*2 = 33.6 -> 2 shares
-    assert "2 shares" in line and a.market == "stock"
+    line = report.position_size(s, "stock", a=a)
+    # risk ladder ₹1,000 / 2,000 / 4,000 / 8,500 with ₹28 per share -> 35 / 71 / 142 / 303 shares, reward 2x
+    assert "₹1,000 → 35 shares (+₹1,960)" in line and "₹8,500 → 303 shares" in line and a.market == "stock"
     short = strategies.Setup("k", "n", "i", "TRADE", entry=1400.0, stop=1428.0, target=1344.0, side="SELL")
-    assert "2 shares" in report.position_size(short, "stock")  # same risk distance, mirrored
+    assert "35 shares" in report.position_size(short, "stock", a=a)  # same risk distance, mirrored
 
 
 def test_commands_route_and_deliver(monkeypatch, sent):

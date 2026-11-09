@@ -235,7 +235,7 @@ def test_vix_scale_text_and_card_line(monkeypatch):
 def test_card_shows_vix_for_indian_asset(monkeypatch, ui):
     h = pd.Series(np.linspace(11, 14, 300), index=pd.date_range("2025-08-01", periods=300, freq="D", tz="UTC"))
     monkeypatch.setattr(vol, "india_vix", lambda: vol.Vix(12.8, -1.5, h, "test"))
-    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=1400))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d", **k: candles(500, freq="D", start=1400))
     main.handle("/stock RELIANCE", "555")
     assert "🌡 India VIX <b>12.80</b>" in ui[0][1] and "🟢" in ui[0][1]
 
@@ -379,32 +379,199 @@ def test_store_gcs_retries_on_conflict(monkeypatch):
 
 # ---------------------------------------------------------------- paper trading
 
-def test_paper_trade_open_status_exit(monkeypatch, ui):
+def _btn(log, prefix):
+    """data of the first button in the last message whose data starts with prefix"""
+    for kind, text, buttons in reversed(log):
+        for label, d in flat(buttons):
+            if d.startswith(prefix):
+                return label, d
+    raise AssertionError(f"no button {prefix}")
+
+
+def test_paper_bot_levels_ladder_leverage_confirm_exit(monkeypatch, ui):
     monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
     prices = {"v": None}
     monkeypatch.setattr(paper, "live_price", lambda m, s: prices["v"])
     monkeypatch.setattr(paper, "candles_since", lambda t: None)
     main.handle_callback("a:c:ETHUSDT:4h", "555")
     a = report.cached("crypto", "ETHUSDT", "4h")
+    prices["v"] = a.now_price
     ui.clear()
     main.handle_callback("pt:o:c:ETHUSDT:4h", "555")
-    assert "PAPER TRADE · ETH/USDT" in ui[0][1] and ("🟢 Paper BUY", "pt:b:c:ETHUSDT:4h") in flat(ui[0][2])
+    assert "PAPER TRADE · ETH/USDT" in ui[0][1] and "Bot's suggestion" in ui[0][1] and "Risk → size → reward" in ui[0][1]
+    assert ("✍️ BUY · my own", "pt:c:b:c:ETHUSDT:4h") in flat(ui[0][2])
     ui.clear()
-    main.handle_callback("pt:b:c:ETHUSDT:4h", "555")
+    main.handle_callback("pt:r:b:c:ETHUSDT:4h", "555")       # bot levels: straight to the size step
+    assert "Step 1/2 · Capital or quantity" in ui[-1][1]
+    assert ("💼 $100", "pt:v:C100") in flat(ui[-1][2])        # capital presets
+    label, d = _btn(ui, "pt:v:")
+    assert label.startswith("🪜 $10 risk →")
+    main.handle_callback(d, "555")
+    assert "Step 2/2 · Leverage" in ui[-1][1]
+    lev5 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:v:L5"][0]
+    assert lev5.startswith("5x → $")                           # qty known: shows the capital it would use
+    main.handle_callback("pt:v:L5", "555")
+    text = ui[-1][1]
+    assert "CONFIRM PAPER BUY" in text and "Market order" in text and "× 5x" in text
+    assert "Capital used <b>$" in text and "Liquidation ≈" in text and "loss <b>$" in text and "R:R" in text
+    ui.clear()
+    main.handle_callback("pt:k", "555")
     assert "Paper BUY opened · #1" in ui[0][1]
     t = paper.open_trades("555")[0]
-    assert t["entry"] == pytest.approx(a.now_price) and t["stop"] < t["entry"] < t["target"]
+    assert t["lev"] == 5 and t["liq"] == pytest.approx(t["entry"] * 0.8) and t["stop"] < t["entry"] < t["target"]
+    risk_money = (t["entry"] - t["stop"]) * t["qty"]
+    assert 5 < risk_money <= 10.0001                          # the $10 rung
     prices["v"] = t["entry"] * 1.02
     ui.clear()
     main.handle("/paper", "555")
-    assert "+2.00%" in ui[0][1] and ("❌ Exit #1 ETHUSDT", "pt:x:1") in flat(ui[0][2])
+    assert "OPEN POSITIONS (1)" in ui[0][1] and "price +2.00%" in ui[0][1] and "on margin +10.0%" in ui[0][1]
+    assert ("❌ Exit #1 ETHUSDT", "pt:x:1") in flat(ui[0][2]) and ("✏️ SL/TP #1", "pt:e:1") in flat(ui[0][2])
     ui.clear()
     main.handle_callback("pt:x:1", "555")
-    assert "closed" in ui[0][1] and "+2.00%" in ui[0][1]
-    assert not paper.open_trades("555") and paper.closed_trades("555")[0]["reason"] == "exited by you"
+    assert "closed" in ui[0][1] and "+2.00%" in ui[0][1] and "on margin +10.0%" in ui[0][1]
     ui.clear()
     main.handle("/history", "555")
     assert "win rate 100%" in ui[0][1]
+
+
+def test_paper_custom_ticket_typed_values_and_pending_limit(monkeypatch, ui):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    monkeypatch.setattr(paper, "candles_since", lambda t: None)
+    main.handle_callback("a:c:SOLUSDT:4h", "555")
+    main.handle_callback("pt:c:s:c:SOLUSDT:4h", "555")       # my own SELL
+    assert "Step 1/5 · Entry" in ui[-1][1] and ("⚡ Market 100.00", "pt:v:mkt") in flat(ui[-1][2])
+    main.handle("105", "555")                                 # above live -> sell LIMIT
+    assert "Step 2/5 · Capital or quantity" in ui[-1][1]
+    main.handle("2.5", "555")                                 # quantity typed
+    assert "Step 3/5 · Leverage" in ui[-1][1]
+    main.handle_callback("pt:v:L1", "555")
+    assert "Step 4/5 · Stop-loss" in ui[-1][1] and ("−$25 → 115.00", "pt:v:M25") in flat(ui[-1][2])
+    main.handle("100", "555")                                 # wrong side for a SELL
+    assert any("must be above" in m[1] for m in ui[-3:])
+    main.handle("110", "555")
+    assert "Step 5/5 · Take profit" in ui[-1][1] and ("1:2 → 95.00", "pt:v:95") in flat(ui[-1][2])
+    main.handle_callback("pt:v:95", "555")
+    text = ui[-1][1]
+    assert "SELL LIMIT at 105" in text and "loss <b>$12.50</b>" in text and "R:R <b>1:2.00</b>" in text
+    assert "Quantity <b>2.5" in text and "Capital used <b>$262.50</b>" in text
+    assert "above your $100" not in text
+    main.handle_callback("pt:k", "555")
+    assert "placed (limit order" in ui[-1][1]
+    o = paper.pending_orders("555")[0]
+    assert o["status"] == "pending" and o["order"] == "limit"
+    idx = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+    df = pd.DataFrame({"open": [101, 104, 99], "high": [103, 106, 100], "low": [100, 103, 94], "close": [102, 104, 95]},
+                      index=idx)
+    ch = paper.advance(o, df)                                  # fills at 105, then hits the 95 target
+    assert ch["status"] == "closed" and ch["reason"] == "target hit" and ch["exit"] == 95 and ch["entry"] == 105
+    ui.clear()
+    main.handle_callback(f"pt:n:{o['id']}", "555")
+    assert "cancelled" in ui[0][1] and not paper.pending_orders("555")
+
+
+def test_paper_capital_entry_with_leverage_gives_quantity(monkeypatch, ui):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    monkeypatch.setattr(paper, "candles_since", lambda t: None)
+    main.handle_callback("a:c:SOLUSDT:4h", "555")
+    main.handle_callback("pt:c:b:c:SOLUSDT:4h", "555")       # my own BUY
+    main.handle_callback("pt:v:mkt", "555")
+    main.handle("$200", "555")                                # capital, not quantity
+    assert "Step 3/5 · Leverage" in ui[-1][1] and "capital $200" in ui[-1][1]
+    lev10 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:v:L10"][0]
+    assert lev10 == "10x → 20 SOL"                            # $200 × 10 / $100
+    main.handle_callback("pt:v:L10", "555")
+    assert "📦 20 SOL (capital $200)" in ui[-1][1]
+    main.handle("$50", "555")                                 # stop-loss as money: $50 / 20 = 2.5 below
+    assert "Step 5/5 · Take profit" in ui[-1][1] and "🛑 97.50" in ui[-1][1]
+    main.handle("150 usd", "555")                             # profit $150 -> 107.5
+    text = ui[-1][1]
+    assert "Capital entered <b>$200</b> × 10x → <b>BUY 20 SOL</b>" in text
+    assert "Capital used <b>$200</b> · position value $2,000" in text
+    assert "loss <b>$50</b>" in text and "profit <b>$150</b>" in text and "1:3.00" in text
+    main.handle_callback("pt:g:size", "555")                  # ✏️ size from the confirm screen
+    main.handle("5", "555")                                   # now a plain quantity
+    text = ui[-1][1]
+    assert "CONFIRM PAPER BUY" in text and "Quantity <b>5 SOL</b> × 10x" in text and "Capital used <b>$50</b>" in text
+    main.handle_callback("pt:g:entry", "555")                 # new entry above the old target: TP asked again
+    main.handle("108", "555")
+    assert "Take profit" in ui[-1][1]
+
+
+def test_paper_capital_too_small_and_parsing():
+    assert paper.parse_number("$1,250.5") == 1250.5 and paper.parse_number("1:100") == 100
+    assert paper.parse_number("5x") == 5 and paper.parse_number("-₹500") == 500 and paper.parse_number("25 usdt") == 25
+    assert paper.is_money("₹500") and paper.is_money("50 usd") and not paper.is_money("0.05")
+    d = {"side": "BUY", "entry": 22000.0, "live": 22000.0, "market_order": True, "qty": None, "cap": None,
+         "mult": 75, "qstep": 1, "cur": "INR", "kind": "lots", "unit": "lot", "lev": None, "lev_choices": [],
+         "margin_pct": 0.12, "recommended": False, "step": "size", "rec": {}}
+    err = paper.apply_value(d, "₹5000")                       # 1 lot needs ≈ ₹1.98 lakh margin
+    assert err and "too small" in err and d["step"] == "size"
+    assert paper.apply_value(d, "₹400000") is None and d["qty"] == 2   # 4L ÷ 12% ÷ (22000×75) = 2.02 → 2 lots
+
+
+def test_paper_edit_sl_tp_and_liquidation_check():
+    t = {"side": "BUY", "entry": 100.0, "stop": 70.0, "target": 120.0, "qty": 1, "status": "open"}
+    assert paper.liquidation("BUY", 100, 10, "crypto") == pytest.approx(90)
+    idx = pd.date_range("2026-01-01", periods=2, freq="5min", tz="UTC")
+    df = pd.DataFrame({"open": [100, 95], "high": [101, 96], "low": [99, 89], "close": [100, 90]}, index=idx)
+    ch = paper.advance({**t, "liq": 90.0}, df)
+    assert ch["reason"] == "liquidated" and ch["exit"] == 90     # liquidation comes before the 70 stop
+    d = {"side": "BUY", "entry": 100, "live": 100, "sl": 80, "tp": 130, "qty": 1, "mult": 1, "qstep": 0, "cur": "USD",
+         "kind": "coins", "unit": "SOL", "lev": 10, "market": "crypto", "pretty": "SOL/USDT", "tf": "4h",
+         "market_order": True, "rec": {"src": "x"}, "margin_pct": None}
+    assert "BEFORE your stop" in paper.confirm_text(d)
+
+
+def test_paper_edit_flow(monkeypatch, ui):
+    t = {"id": 7, "user_id": "555", "user_name": "me", "chat_id": "555", "market": "crypto", "symbol": "BTCUSDT",
+         "pretty": "BTC/USDT", "tf": "4h", "side": "BUY", "entry": 100.0, "stop": 90.0, "target": 120.0, "qty": 1.0,
+         "mult": 1, "unit": "BTC", "currency": "USD", "created": time.time(), "opened": time.time(), "status": "open"}
+    store.update(lambda d: d.setdefault("paper", {}).setdefault("trades", []).append(t))
+    main.handle_callback("pt:e:7", "555")
+    assert "new <b>stop-loss</b>" in ui[-1][1]
+    main.handle_callback("pt:v:be", "555")
+    main.handle("130", "555")
+    assert "#7 updated" in ui[-1][1]
+    got = paper.find(7, "555")
+    assert got["stop"] == 100 and got["target"] == 130
+
+
+def test_risk_ladder_for_forex_and_mcx(monkeypatch):
+    fx_df = candles(500, freq="1h", start=1.08, vol=0.002)
+    fx_df["volume"] = 0.0
+    fx_df.attrs.update(tf="1h", venue="fx", currency="USD")
+    a = report.analyze("EURUSD", "fx", candles=fx_df)
+    lines = "\n".join(report_lines := __import__("bot.risk", fromlist=["x"]).ladder_lines(a, 1.1000, 1.0950, 1.1100))
+    assert "$10 → <b>0.02 lot</b>" in lines and "$100 → <b>0.20 lot</b>" in lines and "+$200" in lines
+
+
+def test_angel_rate_limit_retries_then_fails_cleanly(monkeypatch):
+    from tests.test_fno import fake_session
+
+    sess = fake_session()
+    calls = {"n": 0}
+
+    class DataException(Exception):
+        pass
+
+    real = sess.api.getCandleData
+
+    def flaky(params):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise DataException("Couldn't parse the JSON response received from the server: b'Access denied because "
+                                "of exceeding access rate'")
+        return real(params)
+
+    sess.api.getCandleData = flaky
+    df = sess.candles("99926000", "NSE", "ONE_DAY", 700)
+    assert calls["n"] == 3 and len(df) > 100
+    sess._cache.clear()
+    sess.api.getCandleData = lambda p: (_ for _ in ()).throw(DataException("Couldn't parse the JSON response"))
+    with pytest.raises(angel.AngelError, match="busy"):
+        sess.candles("99926000", "NSE", "ONE_DAY", 700)
 
 
 def test_paper_stop_hit_while_away():
@@ -534,3 +701,17 @@ def test_settings_and_strategies_screens(ui):
     main.handle("/strategies", "555")
     text = ui[0][1]
     assert "THE 14 STRATEGIES" in text and "iron condor" in text and "Fibonacci Golden Zone" in text
+
+
+def test_nse_falls_back_to_yahoo_when_angel_is_busy(monkeypatch):
+    def busy():
+        raise angel.AngelError("candles: Angel One is busy right now (rate limit). Try again in a minute.")
+    monkeypatch.setattr(angel, "configured", lambda: True)
+    monkeypatch.setattr(angel, "session", busy)
+    df = candles(300, freq="1D", start=2500, vol=10)
+    monkeypatch.setattr(data, "yahoo_candles", lambda ticker, tf, label=None: df.copy())
+    got = data.stock_candles("RELIANCE", "1d")
+    assert got.attrs["source"] == "Yahoo (delayed ~15 min — Angel One busy)" and got.attrs["currency"] == "INR"
+    monkeypatch.setattr(data, "yahoo_candles", lambda *a, **k: (_ for _ in ()).throw(data.DataError("no data")))
+    with pytest.raises(data.DataError, match="Angel One RELIANCE: candles: Angel One is busy"):
+        data.stock_candles("RELIANCE", "1d")

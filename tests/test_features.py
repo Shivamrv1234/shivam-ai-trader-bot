@@ -128,7 +128,7 @@ def test_find_stock_without_instrument_list_uses_yahoo(monkeypatch):
 
 
 def test_stock_command_lists_matches_then_analyses(monkeypatch, ui, live_angel):
-    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d", **k: candles(500, freq="D", start=900))
     main.handle("/stock tata")
     assert "NSE matches" in ui[0][1]
     assert ("TATASTEEL", "a:s:TATASTEEL") in flat(ui[0][2])
@@ -143,7 +143,7 @@ def test_stock_command_lists_matches_then_analyses(monkeypatch, ui, live_angel):
 
 
 def test_menu_button_then_typed_name(monkeypatch, ui, live_angel):
-    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d", **k: candles(500, freq="D", start=900))
     main.handle_callback("m:stock", "555")
     assert "ANALYSE ANY NSE STOCK" in ui[0][1] and ("RELIANCE", "a:s:RELIANCE") in flat(ui[0][2])
     ui.clear()
@@ -226,7 +226,7 @@ def test_futures_trade_plan_shifts_levels_and_flags_risk(live_angel):
     rep = angel.build_futures(live_angel, "NIFTY")
     text = futures.trade_plan(rep, StubAnalysis())
     assert "BUY (go long)" in text and f"{SPOT + 65:,.2f}" in text and f"{SPOT - 200 + 65:,.2f}" in text
-    assert "risk ≈ ₹15,000" in text and "far more than your limit" in text   # 200 x 75
+    assert "risk ≈ ₹15,000" in text and "above your ₹8,500 maximum" in text   # 200 x 75
     short = futures.trade_plan(rep, StubAnalysis("SELL", "SELL"))
     assert "SELL (go short)" in short
     none = StubAnalysis()
@@ -518,7 +518,7 @@ def test_edit_ignores_not_modified_and_falls_back(monkeypatch):
 def test_every_menu_button_works(monkeypatch, ui, live_angel):
     monkeypatch.setattr(data, "top_crypto_by_volume", lambda n: [{"symbol": "BTCUSDT", "change_pct": 1.0}])
     monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=3000: candles())
-    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d": candles(500, freq="D", start=900))
+    monkeypatch.setattr(data, "stock_candles", lambda sym, timeframe="1d", **k: candles(500, freq="D", start=900))
     fake_feeds(monkeypatch, 5)
     for label, cb in flat(main.MENU):
         ui.clear()

@@ -93,6 +93,7 @@ def fake_session(oi_field="opnInterest"):
     a.api = FakeApi(raw, oi_field)
     a._inst = angel.load_instruments(raw)
     a.last_keys = {}
+    a._cache = {}
     return a
 
 
@@ -173,7 +174,7 @@ def test_index_analysis_uses_angel_live_data(monkeypatch):
     text = report.full_text(a)
     assert "Angel One (live)" in report.card(a) and "📦 Size" not in text
     if a.best():
-        assert "trade it via F&amp;O" in report.card(a)
+        assert "F&amp;O buttons" in report.card(a) and "Risk → size → reward" in report.card(a)
 
 
 def test_fno_without_angel_explains(monkeypatch):
