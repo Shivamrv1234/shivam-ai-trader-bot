@@ -1,8 +1,5 @@
 # SHIVAM AI TRADER — Telegram bot for crypto, NSE, F&O, forex & commodities
 
-# [Setup Guide](https://drive.google.com/file/d/1WnW2uJq3yyJ1XKbVyQivCQdwBbiPEtfJ/view?usp=sharing)
-# [Bot Features](https://drive.google.com/file/d/1Of4lLxor6DhZV9Chm41ugAFUPuwLjZdm/view?usp=sharing)
-
 Telegram is where you see alerts, ask questions and paper-trade. The analysis runs on **GitHub Actions**
 (alerts), **Google Cloud Run** (instant replies) or **your own Windows PC** (`start_bot.bat`). The bot reads
 data only: it has **no code that can place orders** with any broker.
@@ -113,6 +110,10 @@ and SELL, and the risk ladder. Then:
   BUY 20 SOL"), **capital used** and position value, R:R, % on capital, crypto liquidation price and
   warnings. ✏️ Entry / Size / SL / TP change one field and come straight back (a new entry that puts the old
   stop or target on the wrong side asks for it again).
+- **One message, not six.** Tapping a ticket button changes the same message to the next step; the trade
+  confirmation replaces the ticket. A button tapped twice, or an old button of a finished step, is ignored.
+  In a group, only numbers and amounts (`74250`, `$200`, `market`) are read as ticket values — ordinary
+  chat between members is left alone.
 
 **💼 Paper trades** lists open positions and pending orders with live price, P&L in money, % price move,
 % on margin, R multiple, distance to stop/target and liquidation, with **❌ Exit**, **✏️ SL/TP** and
@@ -227,6 +228,13 @@ straight to your own small server, so replies arrive in seconds. Alerts keep run
 `cd shivam-ai-trader-bot && git pull && bash deploy_cloudrun.sh` and press Enter to keep each value.
 **Stop instant replies:** `bash deploy_cloudrun.sh disconnect`, then re-enable the Bot commands workflow.
 
+**One server only.** The script deploys exactly one Cloud Run server (`--max-instances 1`). The bot keeps
+open paper tickets, numbered lists and recent analyses in that server's memory, so a second server would
+answer "No paper ticket open" and send charts twice. Don't raise that number in the Cloud console.
+**No wake-up wait (optional):** after a quiet period the server sleeps and the first reply takes 10–20
+seconds. `MIN_INSTANCES=1 bash deploy_cloudrun.sh` keeps it awake all day; Google bills idle time for
+that (see the Cloud Run pricing page).
+
 **Cost:** normal personal use fits Cloud Run's free tier (2 million requests and 180,000 vCPU-seconds a
 month). Container images are stored in Artifact Registry, which is free up to 0.5 GB. The deploy script
 keeps that small: after every deploy it deletes old images (keeping the 2 newest and the one in use), sets
@@ -251,7 +259,7 @@ python -m bot.main local --no-alerts   # replies only; GitHub keeps sending aler
 ```
 
 Only one place may answer messages: if Cloud Run is connected, run `python -m bot.main webhook delete`
-first, and disable GitHub's "Bot commands" workflow. If the PC/VM sends alerts, disable GitHub's
+first, and disable GitHub's "Bot commands" workflow (otherwise both answer and you get everything twice). If the PC/VM sends alerts, disable GitHub's
 "Market alerts" workflow. The full steps (including a Google Cloud VM as a service) are in
 `SHIVAM_AI_TRADER_Setup_Guide_A_to_Z.pdf`.
 

@@ -8,6 +8,10 @@ set -euo pipefail
 
 SERVICE="shivam-trader-bot"
 REGION="${REGION:-us-central1}"   # free-tier outbound data is counted from North America
+# Exactly ONE server: the bot keeps open paper tickets, numbered lists and analyses in that server's
+# memory, so a second server would answer "No paper ticket open" and send charts twice.
+# MIN_INSTANCES=1 keeps it awake all day (no 10-20 s wake-up after a quiet period) - Google bills for that.
+MIN_INSTANCES="${MIN_INSTANCES:-0}"
 
 PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
 if [ -z "$PROJECT" ]; then
@@ -185,8 +189,8 @@ gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
   --allow-unauthenticated \
-  --memory 1Gi --cpu 1 \
-  --concurrency 1 --max-instances 3 --min-instances 0 \
+  --memory 1Gi --cpu 1 --cpu-boost \
+  --concurrency 8 --max-instances 1 --min-instances "$MIN_INSTANCES" \
   --timeout 300 \
   "${ENV_FLAG[@]}" \
   --quiet
@@ -207,7 +211,7 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   --data-urlencode "url=${URL}/telegram" \
   --data-urlencode "secret_token=${SECRET}" \
   --data-urlencode 'allowed_updates=["message","callback_query"]' \
-  --data-urlencode "max_connections=1" ; echo   # one message at a time: the bot's memory stays on one server
+  --data-urlencode "max_connections=1" ; echo   # one message at a time, in the order they were sent
 echo
 echo "Done. Send /start to your bot: it should reply within seconds (the first reply after a quiet"
 echo "period can take 10-20 seconds while the server wakes up)."

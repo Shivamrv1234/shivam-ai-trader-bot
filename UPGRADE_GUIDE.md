@@ -1,4 +1,33 @@
-# SHIVAM AI TRADER — Upgrade guide (9 Nov 2026)
+# SHIVAM AI TRADER — Upgrade guide (10 Nov 2026)
+
+## Update of 10 Nov 2026 — speed, double charts, "No paper ticket open"
+
+**What was wrong.** Cloud Run was allowed to start up to three servers. The bot keeps open paper tickets,
+numbered lists and recent analyses in a server's memory, so whenever a second server took a message it
+knew nothing: it answered "No paper ticket open", analysed again from scratch (slow) or sent the same
+chart a second time. Every new server also needed 10–20 seconds to start.
+
+1. **One Cloud Run server** (`--max-instances 1`, start-up CPU boost). It accepts several requests at once
+   but works on one message at a time, so a message Telegram sends twice is answered "duplicate" at once.
+   **You must run `bash deploy_cloudrun.sh` again (part B) for this to take effect.**
+2. **Double taps and late taps are ignored.** The same button tapped again while the bot is working gives
+   one answer, not two. Ticket buttons know their step, so an old button can't fill the next step.
+3. **The paper ticket stays in one message.** Each tap changes the same message to the next step, and the
+   trade confirmation replaces the ticket. A wrong value shows the warning and the step together.
+4. **Group chat is not read as ticket input.** While a ticket is open, only numbers and amounts
+   (`74250`, `$200`, `market`) are taken; ordinary messages between members are left alone.
+5. **Fewer, faster network calls.** Connections to Telegram, Binance and Cloud Storage stay open; the paper
+   store is kept in memory between reads (one Cloud Storage request per screen instead of five); the paper
+   list fetches only the candles a trade's age needs and writes all fills in one go.
+6. **PC mode:** messages are marked as taken immediately, so GitHub's "Bot commands" workflow can no longer
+   answer the same message a second time. Still disable that workflow when the PC or Cloud Run answers.
+7. Optional: `MIN_INSTANCES=1 bash deploy_cloudrun.sh` keeps the server awake (no wake-up wait). Google
+   bills idle time for this.
+
+132 offline tests.
+
+---
+
 
 ## Update of 9 Nov 2026
 
@@ -22,7 +51,7 @@
    used: its terms forbid automated data collection, its robots.txt blocks `/api/`, and it blocks cloud
    servers such as Cloud Run.
 
-Update the same way as before (part A, then part B or C below). 124 offline tests.
+Update the same way as before (part A, then part B or C below).
 
 ---
 

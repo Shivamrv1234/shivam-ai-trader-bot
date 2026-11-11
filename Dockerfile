@@ -14,5 +14,6 @@ RUN pip install -r requirements.txt
 COPY bot ./bot
 COPY config.json .
 
-# One request at a time per container (charts use matplotlib, which isn't thread-safe).
-CMD exec gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 1 --timeout 300 bot.server:app
+# One process (the bot's memory lives in it) with a few threads: updates are still handled one at a
+# time (bot/server.py), but a message Telegram sends twice is answered at once instead of waiting.
+CMD exec gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 8 --timeout 300 bot.server:app
