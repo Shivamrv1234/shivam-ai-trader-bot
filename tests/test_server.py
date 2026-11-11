@@ -79,3 +79,41 @@ def test_github_run_skips_when_webhook_active(monkeypatch):
     monkeypatch.setattr(telegram, "set_commands", lambda: None)
     monkeypatch.setattr(telegram, "pending_updates", conflict)
     main.run_commands()  # must not raise
+
+
+def test_resent_update_is_answered_at_once_while_the_first_is_still_running(client, monkeypatch):
+    """Telegram resends an update when the answer is slow. The copy must get "duplicate" immediately
+    (not wait, and not be handled a second time), and the next update waits its turn."""
+    import threading
+
+    from bot import server
+
+    started, release, order = threading.Event(), threading.Event(), []
+
+    def slow(update):
+        order.append(("start", update["update_id"]))
+        if update["update_id"] == 70:
+            started.set()
+            assert release.wait(5)
+        order.append(("end", update["update_id"]))
+
+    monkeypatch.setattr(main, "process_update", slow)
+    results = {}
+
+    def post(name, uid):
+        results[name] = server.app.test_client().post("/telegram", json=msg(uid, "/help"), headers=headers()).data
+
+    first = threading.Thread(target=post, args=("first", 70))
+    first.start()
+    assert started.wait(5)
+    post("copy", 70)                                   # returns while the first is still working
+    assert results["copy"] == b"duplicate" and "first" not in results
+    nxt = threading.Thread(target=post, args=("next", 71))
+    nxt.start()
+    nxt.join(0.2)
+    assert ("start", 71) not in order                  # one update at a time
+    release.set()
+    first.join(5)
+    nxt.join(5)
+    assert results == {"first": b"ok", "copy": b"duplicate", "next": b"ok"}
+    assert order == [("start", 70), ("end", 70), ("start", 71), ("end", 71)]

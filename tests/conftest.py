@@ -35,6 +35,9 @@ def offline(monkeypatch):
 def private_store(monkeypatch, tmp_path):
     """Paper trades and approved groups go to a temporary file in every test."""
     monkeypatch.setenv("BOT_STORE", str(tmp_path / "store.json"))
+    from bot import store
+
+    store.forget()
 
 
 @pytest.fixture(autouse=True)

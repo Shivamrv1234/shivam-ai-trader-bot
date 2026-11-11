@@ -1,5 +1,6 @@
 """Running on your own PC / a VM: .env file, long polling, scheduled alerts."""
 import os
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -47,9 +48,16 @@ def test_local_mode_answers_messages(monkeypatch, tmp_path):
         offsets.append(offset)
         return [{"update_id": 41, "message": {"chat": {"id": 555}, "text": "/help"}}] if offset is None else []
 
+    confirmed = []
     monkeypatch.setattr(telegram, "poll_updates", poll)
+    monkeypatch.setattr(telegram, "confirm_updates", confirmed.append)
     main.run_local(with_alerts=False, max_loops=2)
     assert offsets == [None, 42] and "HELP" in sent[0]
+    for _ in range(50):                      # confirmed at once (in the background), not only at the next poll
+        if confirmed:
+            break
+        time.sleep(0.02)
+    assert confirmed == [41]
 
 
 def test_local_mode_refuses_while_webhook_active(monkeypatch):

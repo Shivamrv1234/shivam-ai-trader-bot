@@ -367,14 +367,24 @@ def test_store_gcs_retries_on_conflict(monkeypatch):
             return R(412)
         assert f"ifGenerationMatch={obj['gen']}" in url
         obj["doc"] = json.loads(data)
-        return R(200, {})
+        obj["gen"] += 1
+        return R(200, {"generation": str(obj["gen"])})
 
-    monkeypatch.setattr(store.requests, "get", get)
-    monkeypatch.setattr(store.requests, "post", post)
+    gets = []
+    monkeypatch.setattr(store._HTTP, "get", lambda url, **k: gets.append(url) or get(url, **k))
+    monkeypatch.setattr(store._HTTP, "post", post)
     monkeypatch.setattr(store.time, "sleep", lambda s: None)
     store._tok.clear()
+    store.forget()
     store.set_group("-100123", True)
     assert len(puts) == 2 and obj["doc"]["groups"] == ["-100123"]
+    # the copy in memory answers the next reads, and the next write needs no read at all
+    reads = len([u for u in gets if "storage.googleapis" in u])
+    assert store.load()["groups"] == ["-100123"] and store.approved_groups() == {"-100123"}
+    store.set_group("-100999", True)
+    assert len([u for u in gets if "storage.googleapis" in u]) == reads and len(puts) == 3
+    assert obj["doc"]["groups"] == ["-100123", "-100999"]
+    store.forget()
 
 
 # ---------------------------------------------------------------- paper trading
@@ -403,12 +413,12 @@ def test_paper_bot_levels_ladder_leverage_confirm_exit(monkeypatch, ui):
     ui.clear()
     main.handle_callback("pt:r:b:c:ETHUSDT:4h", "555")       # bot levels: straight to the size step
     assert "Step 1/2 · Capital or quantity" in ui[-1][1]
-    assert ("💼 $100", "pt:v:C100") in flat(ui[-1][2])        # capital presets
-    label, d = _btn(ui, "pt:v:")
+    assert ("💼 $100", "pt:w:size:C100") in flat(ui[-1][2])        # capital presets
+    label, d = _btn(ui, "pt:w:size:")
     assert label.startswith("🪜 $10 risk →")
     main.handle_callback(d, "555")
     assert "Step 2/2 · Leverage" in ui[-1][1]
-    lev5 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:v:L5"][0]
+    lev5 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:w:lev:L5"][0]
     assert lev5.startswith("5x → $")                           # qty known: shows the capital it would use
     main.handle_callback("pt:v:L5", "555")
     text = ui[-1][1]
@@ -440,18 +450,18 @@ def test_paper_custom_ticket_typed_values_and_pending_limit(monkeypatch, ui):
     monkeypatch.setattr(paper, "candles_since", lambda t: None)
     main.handle_callback("a:c:SOLUSDT:4h", "555")
     main.handle_callback("pt:c:s:c:SOLUSDT:4h", "555")       # my own SELL
-    assert "Step 1/5 · Entry" in ui[-1][1] and ("⚡ Market 100.00", "pt:v:mkt") in flat(ui[-1][2])
+    assert "Step 1/5 · Entry" in ui[-1][1] and ("⚡ Market 100.00", "pt:w:entry:mkt") in flat(ui[-1][2])
     main.handle("105", "555")                                 # above live -> sell LIMIT
     assert "Step 2/5 · Capital or quantity" in ui[-1][1]
     main.handle("2.5", "555")                                 # quantity typed
     assert "Step 3/5 · Leverage" in ui[-1][1]
     main.handle_callback("pt:v:L1", "555")
-    assert "Step 4/5 · Stop-loss" in ui[-1][1] and ("−$25 → 115.00", "pt:v:M25") in flat(ui[-1][2])
+    assert "Step 4/5 · Stop-loss" in ui[-1][1] and ("−$25 → 115.00", "pt:w:sl:M25") in flat(ui[-1][2])
     main.handle("100", "555")                                 # wrong side for a SELL
     assert any("must be above" in m[1] for m in ui[-3:])
     main.handle("110", "555")
-    assert "Step 5/5 · Take profit" in ui[-1][1] and ("1:2 → 95.00", "pt:v:95") in flat(ui[-1][2])
-    main.handle_callback("pt:v:95", "555")
+    assert "Step 5/5 · Take profit" in ui[-1][1] and ("1:2 → 95.00", "pt:w:tp:95") in flat(ui[-1][2])
+    main.handle_callback("pt:w:tp:95", "555")
     text = ui[-1][1]
     assert "SELL LIMIT at 105" in text and "loss <b>$12.50</b>" in text and "R:R <b>1:2.00</b>" in text
     assert "Quantity <b>2.5" in text and "Capital used <b>$262.50</b>" in text
@@ -479,9 +489,9 @@ def test_paper_capital_entry_with_leverage_gives_quantity(monkeypatch, ui):
     main.handle_callback("pt:v:mkt", "555")
     main.handle("$200", "555")                                # capital, not quantity
     assert "Step 3/5 · Leverage" in ui[-1][1] and "capital $200" in ui[-1][1]
-    lev10 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:v:L10"][0]
+    lev10 = [lbl for lbl, cb in flat(ui[-1][2]) if cb == "pt:w:lev:L10"][0]
     assert lev10 == "10x → 20 SOL"                            # $200 × 10 / $100
-    main.handle_callback("pt:v:L10", "555")
+    main.handle_callback("pt:w:lev:L10", "555")
     assert "📦 20 SOL (capital $200)" in ui[-1][1]
     main.handle("$50", "555")                                 # stop-loss as money: $50 / 20 = 2.5 below
     assert "Step 5/5 · Take profit" in ui[-1][1] and "🛑 97.50" in ui[-1][1]
@@ -497,6 +507,115 @@ def test_paper_capital_entry_with_leverage_gives_quantity(monkeypatch, ui):
     main.handle_callback("pt:g:entry", "555")                 # new entry above the old target: TP asked again
     main.handle("108", "555")
     assert "Take profit" in ui[-1][1]
+
+
+def _tap(uid, data_str, mid=900, user=555, chat=555, name="Me"):
+    return {"update_id": uid, "callback_query": {"id": str(uid), "data": data_str, "from": {"id": user, "first_name": name},
+                                                 "message": {"message_id": mid, "chat": {"id": chat}}}}
+
+
+def test_paper_ticket_updates_in_place_and_ignores_late_or_double_taps(monkeypatch, ui):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    monkeypatch.setattr(paper, "candles_since", lambda t: None)
+    monkeypatch.setattr(main.time, "time", lambda: clock["t"])
+    clock = {"t": 1_800_000_000.0}
+    main._TAPS.clear()
+    main.handle_callback("a:c:SOLUSDT:4h", "555")
+    ui.clear()
+    main.process_update(_tap(1, "pt:c:b:c:SOLUSDT:4h"))        # ✍️ BUY · my own, tapped on message 900
+    assert [m[0] for m in ui] == ["edit"] and "Step 1/5" in ui[-1][1]     # the same message becomes step 1
+    main.process_update(_tap(2, "pt:w:entry:mkt"))
+    assert ui[-1][0] == "edit" and "Step 2/5" in ui[-1][1]
+    n = len(ui)
+    main.process_update(_tap(3, "pt:w:entry:mkt"))             # the same button again right away (double tap)
+    assert len(ui) == n
+    clock["t"] += 60
+    main.process_update(_tap(4, "pt:w:entry:mkt"))             # an old button of a finished step, much later
+    assert len(ui) == n and state.draft("555")["step"] == "size"
+    main.process_update(_tap(5, "pt:w:size:C200"))
+    main.process_update(_tap(6, "pt:w:lev:L10"))
+    assert "Step 4/5 · Stop-loss" in ui[-1][1] and state.draft("555")["qty"] == 20
+    n = len(ui)
+    main.handle("90", "555")                                   # typed stop: one new message with the next step
+    assert len(ui) == n + 1 and ui[-1][0] == "text" and "Step 5/5" in ui[-1][1]
+    main.handle("80", "555")                                   # wrong side: the warning and the step in ONE message
+    assert len(ui) == n + 2 and ui[-1][1].startswith("⚠️ For a BUY the target must be above") and "Step 5/5" in ui[-1][1]
+    main.handle("120", "555")
+    assert "CONFIRM PAPER BUY" in ui[-1][1]
+    clock["t"] += 60
+    main.process_update(_tap(7, "pt:k", mid=901))
+    assert ui[-1][0] == "edit" and "Paper BUY opened · #1" in ui[-1][1]
+    n = len(ui)
+    main.process_update(_tap(8, "pt:k", mid=901))              # Confirm tapped twice: one trade, no second message
+    assert len(ui) == n and len(paper.open_trades("555")) == 1
+
+
+def test_group_chat_is_not_read_as_ticket_input(monkeypatch, ui):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    store.set_group("-100777", True)
+    main._GROUPS.clear()
+    main._TAPS.clear()
+
+    def say(uid, text, reply_to_bot=False):
+        m = {"message_id": uid, "chat": {"id": -100777, "type": "supergroup"}, "from": {"id": 42, "first_name": "Aman"},
+             "text": text}
+        if reply_to_bot:
+            m["reply_to_message"] = {"from": {"is_bot": True, "username": "shivambot"}}
+        main.process_update({"update_id": uid, "message": m})
+
+    main.process_update(_tap(1, "a:c:SOLUSDT:4h", user=42, chat=-100777, name="Aman"))
+    main.process_update(_tap(2, "pt:c:b:c:SOLUSDT:4h", user=42, chat=-100777, name="Aman"))
+    main.process_update(_tap(3, "pt:w:entry:mkt", user=42, chat=-100777, name="Aman"))
+    assert "Step 2/5" in ui[-1][1]
+    n = len(ui)
+    say(10, "Han toh swing mai hi bn rha hai")                 # ordinary chat between members
+    say(11, "ok bhai 2 min")
+    assert len(ui) == n and state.draft("-100777:42")["step"] == "size"   # nothing sent, ticket untouched
+    say(12, "$200")                                            # a real ticket value
+    assert len(ui) == n + 1 and "Step 3/5 · Leverage" in ui[-1][1]
+    # in a private chat, other text during a ticket is handled as a normal message, not as a wrong price
+    main.handle_callback("pt:c:b:c:SOLUSDT:4h", "555")
+    main.handle("yeh kya ho raha hai aaj market mein", "555")
+    assert "Please send a price" not in ui[-1][1] and state.draft("555")["step"] == "entry"
+    main.handle("101", "555")                                  # the ticket is still waiting for its number
+    assert state.draft("555")["entry"] == 101 and "Step 2/5" in ui[-1][1]
+    assert paper.looks_like_input("74,250.5") and paper.looks_like_input("market") and paper.looks_like_input("₹5000")
+    assert not paper.looks_like_input("sale tune 4 ghante ka chart bheja tha")
+
+
+def test_same_button_twice_gives_one_chart(monkeypatch, ui):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    main._TAPS.clear()
+    main.process_update(_tap(1, "a:c:BTCUSDT:30m"))
+    main.process_update(_tap(2, "a:c:BTCUSDT:30m"))            # tapped again while the first was still loading
+    assert [m[0] for m in ui].count("photo") == 1
+
+
+def test_paper_check_fetches_only_what_it_needs(monkeypatch):
+    asked = []
+
+    def fake(sym, timeframe=None, limit=None):
+        asked.append(limit)
+        df = candles(40, freq="5min", start=100, vol=0.1)
+        df.index = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor("5min"), periods=len(df), freq="5min")
+        df.attrs["live_price"] = 101.5
+        return df
+
+    monkeypatch.setattr(data, "crypto_candles", fake)
+    paper._CANDLES.clear()
+    paper._PRICE.clear()
+    t = {"market": "crypto", "symbol": "BTCUSDT", "created": time.time() - 1800}
+    df = paper.candles_since(t)
+    assert asked == [12] and 4 <= len(df) <= 6                 # a 30-minute-old trade: 12 candles, not 1000
+    paper.candles_since({**t, "created": time.time() - 600})
+    assert asked == [12]                                       # reused for a minute
+    assert paper.live_price("crypto", "BTCUSDT") == 101.5      # and the live price came with them
+    paper.candles_since({**t, "created": time.time() - 86400})
+    assert asked == [12, 291]                                  # an older trade needs more
+    paper._CANDLES.clear()
+    paper._PRICE.clear()
 
 
 def test_paper_capital_too_small_and_parsing():
@@ -531,7 +650,7 @@ def test_paper_edit_flow(monkeypatch, ui):
     store.update(lambda d: d.setdefault("paper", {}).setdefault("trades", []).append(t))
     main.handle_callback("pt:e:7", "555")
     assert "new <b>stop-loss</b>" in ui[-1][1]
-    main.handle_callback("pt:v:be", "555")
+    main.handle_callback("pt:w:esl:be", "555")
     main.handle("130", "555")
     assert "#7 updated" in ui[-1][1]
     got = paper.find(7, "555")
@@ -715,3 +834,51 @@ def test_nse_falls_back_to_yahoo_when_angel_is_busy(monkeypatch):
     monkeypatch.setattr(data, "yahoo_candles", lambda *a, **k: (_ for _ in ()).throw(data.DataError("no data")))
     with pytest.raises(data.DataError, match="Angel One RELIANCE: candles: Angel One is busy"):
         data.stock_candles("RELIANCE", "1d")
+
+
+def test_edited_message_in_a_group_still_names_the_member(monkeypatch):
+    calls = []
+    monkeypatch.setattr(telegram, "_call", lambda method, payload=None, files=None: calls.append((method, payload)) or {})
+    token = telegram.set_ctx(telegram.Ctx("-100777", "42", "Aman", True, None, None))
+    try:
+        telegram.show("Step 2/5", None, [[("x", "pt:q")]], 900)
+    finally:
+        telegram.reset_ctx(token)
+    method, payload = calls[0]
+    assert method == "editMessageText" and payload["message_id"] == 900
+    assert payload["text"].startswith("👤 <a href=\"tg://user?id=42\">Aman</a>\nStep 2/5")
+
+
+def test_cloud_run_is_one_server_with_threads():
+    """The bot's memory (open tickets, lists, analyses) lives in one process: never more than one server."""
+    from bot.config import ROOT
+
+    script = (ROOT / "deploy_cloudrun.sh").read_text()
+    assert "--max-instances 1 " in script and "--max-instances 3" not in script and "--concurrency 8" in script
+    docker = (ROOT / "Dockerfile").read_text()
+    assert "--workers 1 --threads 8" in docker
+
+
+def test_telegram_keeps_one_connection_and_retries_a_stale_one(monkeypatch):
+    import requests
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
+    calls = []
+
+    class R:
+        def json(self):
+            return {"ok": True, "result": {"message_id": 1}}
+
+    def post(url, data=None, files=None, timeout=None):
+        calls.append(url.rsplit("/", 1)[1])
+        if len(calls) == 1:
+            raise requests.ConnectionError("the kept-open connection was closed by the server")
+        return R()
+
+    monkeypatch.setattr(telegram._HTTP, "post", post)
+    assert telegram._call("sendMessage", {"chat_id": "1", "text": "hi"}) == {"message_id": 1}
+    assert calls == ["sendMessage", "sendMessage"]                 # sent again once on the same session
+    calls.clear()
+    with pytest.raises(telegram.TelegramError):                    # a photo upload is not replayed
+        telegram._call("sendPhoto", {"chat_id": "1"}, files={"photo": ("c.png", b"x", "image/png")})
+    assert calls == ["sendPhoto"]
