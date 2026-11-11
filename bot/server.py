@@ -14,6 +14,7 @@ from collections import deque
 from flask import Flask, abort, request
 
 from bot import main, telegram
+from bot.version import BUILD, VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("server")
@@ -30,7 +31,7 @@ _commands_set = False
 
 @app.get("/")
 def health():
-    return "SHIVAM AI TRADER bot is running.", 200
+    return f"SHIVAM AI TRADER bot is running. Version {VERSION} (build {BUILD}).", 200
 
 
 @app.post("/telegram")

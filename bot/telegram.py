@@ -38,6 +38,7 @@ COMMANDS = [
     ("plan", "F&O plan: buying / selling / hedging, e.g. /plan NIFTY"),
     ("paper", "Your paper trades: status, P&L %, exit"),
     ("board", "Paper-trade leaderboard of this group"),
+    ("version", "Which version is running, and where"),
     ("pairs", "Pairs trading (stat-arb) on correlated stocks"),
     ("strategies", "What the 14 strategies look for"),
     ("settings", "Capital, risk and watchlists"),

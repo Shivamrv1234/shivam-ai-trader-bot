@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from bot import (ai, angel, chart, data, fno, fundamentals, futures, fx, news, paper, report, state, store,
                  strategies, symbols, telegram, vol)
+from bot.version import BUILD, VERSION
 from bot.config import (allowed_chats, allowed_users, cfg, gemini_key, gemini_model, secret, telegram_chat_id,
                         telegram_token)
 
@@ -48,7 +49,8 @@ WELCOME = (
     "📊 Option chain · 🧮 Greeks · 🧠 F&amp;O plan (buy / sell / hedge)\n"
     "🏢 Fundamentals · 📰 News 🟢/🔴 · 💼 Paper trades · ⚖️ Pairs\n\n"
     "Tip: just send <code>ETH</code>, <code>RELIANCE 15m</code>, <code>XAUUSD</code> or <code>tata motors</code>.\n"
-    "<i>For learning and paper trading — not financial advice.</i>"
+    "<i>For learning and paper trading — not financial advice.</i>\n"
+    f"<i>Version {VERSION} · /version</i>"
 )
 
 HELP = (
@@ -69,7 +71,8 @@ HELP = (
     "<b>Pairs</b> /pairs · /pair HDFCBANK ICICIBANK\n\n"
     "<b>Groups</b> add the bot, then the owner sends /allow in the group. Members use commands "
     "(<code>/analyze@yourbot ETH</code>) or reply to the bot. /id shows chat and user IDs.\n\n"
-    "<b>Automatic alerts</b> crypto after every 4h candle · stocks 16:10 IST · F&amp;O 09:45 &amp; 14:30 IST"
+    "<b>Automatic alerts</b> crypto after every 4h candle · stocks 16:10 IST · F&amp;O 09:45 &amp; 14:30 IST\n"
+    "<b>Which version is running?</b> /version"
 )
 
 PROMPTS = {
@@ -594,7 +597,13 @@ def paper_status(message_id: int | None = None) -> None:
     warn = paper.risk_warning(chat, uid)
     if warn:
         text += "\n\n" + warn
-    telegram.show(text, None, paper_buttons(trades, pending), message_id)
+    rows = paper_buttons(trades, pending)
+    d = state.draft(key_of(None))
+    if d and not d.get("edit_id"):          # a ticket that was started and not confirmed or cancelled yet
+        text += (f"\n\n📝 <b>Open ticket:</b> {d['side']} {html.escape(d['pretty'])} · {d['tf']} — "
+                 "kept for a day until you confirm or cancel it.")
+        rows.insert(0, [("📝 Continue ticket", "pt:resume"), ("✖ Discard ticket", "pt:q")])
+    telegram.show(text, None, rows, message_id)
 
 
 def paper_ticket(market: str, sym: str, tf: str) -> None:
@@ -763,6 +772,8 @@ def paper_callback(rest: str, message_id: int | None) -> None:
                            buttons=[[("💼 My paper trades", "pt:l"), HOME]])
     elif sub == "e" and val.isdigit():
         paper_edit_start(int(val))
+    elif sub == "resume":
+        paper_step()
     elif sub == "v":
         paper_input(val, message_id)
     elif sub == "w":                       # a ticket button that knows which step it belongs to
@@ -963,9 +974,38 @@ def cmd_settings() -> None:
         f"💾 Paper trades saved in: {html.escape(store.describe())}\n"
         f"👥 Groups allowed: {len(groups)}"
         + (f" ({html.escape(', '.join(groups))})" if groups else " — add the bot to a group and send /allow there") + "\n"
-        f"🤖 AI summary: {'on' if gemini_key() and gemini_model() else 'off'}",
+        f"🤖 AI summary: {'on' if gemini_key() and gemini_model() else 'off'}\n"
+        f"🧩 Version {VERSION} · /version",
         buttons=[[HOME]],
     )
+
+
+STARTED = time.time()
+
+
+def where_running() -> str:
+    import os
+
+    if os.getenv("K_SERVICE"):
+        return f"Google Cloud Run ({os.getenv('K_REVISION', os.getenv('K_SERVICE'))})"
+    if os.getenv("GITHUB_ACTIONS"):
+        return "GitHub Actions (checks Telegram every 5 minutes)"
+    return "this PC / VM"
+
+
+def cmd_version() -> None:
+    """Which code is really running, where, and how long its memory lasts."""
+    up = int(time.time() - STARTED)
+    awake = f"{up // 3600} h {up % 3600 // 60} min" if up >= 3600 else f"{up // 60} min {up % 60} s"
+    memory = ("Google Cloud Storage — open tickets, lists and paper trades survive restarts"
+              if state.shared() else "a file on this machine (.state)")
+    telegram.send_text(
+        f"🧩 <b>SHIVAM AI TRADER</b> · version <b>{VERSION}</b> (build {BUILD})\n"
+        f"🖥 Running on: {html.escape(where_running())}\n"
+        f"⏱ This server has been awake for {awake}\n"
+        f"🧠 Memory: {memory}\n"
+        "📝 An open paper ticket is kept for a day, until you confirm or cancel it.",
+        buttons=[[HOME]])
 
 
 # ---------------------------------------------------------------- routing
@@ -1028,6 +1068,8 @@ def handle(text: str, chat_id: str | None = None) -> None:
         cmd_strategies()
     elif cmd == "/settings":
         cmd_settings()
+    elif cmd == "/version":
+        cmd_version()
     elif cmd == "/paper":
         cmd_paper(args)
     elif cmd == "/exit":
@@ -1265,6 +1307,16 @@ QUICK_KINDS = ("pt", "n", "m")
 
 def process_update(u: dict) -> None:
     """Handle one Telegram update (a message or a button tap). Used by GitHub runs, Cloud Run and the PC."""
+    if not state.begin(u.get("update_id")):
+        log.info("Update %s was already handled (a copy from Telegram); ignored.", u.get("update_id"))
+        return
+    try:
+        _process(u)
+    finally:
+        state.flush()
+
+
+def _process(u: dict) -> None:
     if "callback_query" in u:
         cb = u["callback_query"]
         msg = cb.get("message") or {}

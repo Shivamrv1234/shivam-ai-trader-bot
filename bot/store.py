@@ -36,6 +36,14 @@ class StoreError(RuntimeError):
     pass
 
 
+class Skip(Exception):
+    """Raised inside an update() function to return a value WITHOUT writing anything."""
+
+    def __init__(self, value=None):
+        super().__init__("skip")
+        self.value = value
+
+
 def location() -> str:
     return os.getenv("BOT_STORE", "").strip() or str(ROOT / ".state" / "store.json")
 
@@ -161,13 +169,19 @@ def update(fn):
     with _lock:
         if not is_gcs():
             doc = _file_get()
-            out = fn(doc)
+            try:
+                out = fn(doc)
+            except Skip as skip:
+                return skip.value
             _file_put(doc)
             return out
         for attempt in range(5):
             # First try with the copy in memory (any age): the generation check refuses a stale one.
             doc, gen = _gcs_read(float("inf") if attempt == 0 else 0)
-            out = fn(doc)
+            try:
+                out = fn(doc)
+            except Skip as skip:
+                return skip.value
             new_gen = _gcs_put(doc, gen)
             if new_gen is not None:
                 _remember(doc, new_gen)
