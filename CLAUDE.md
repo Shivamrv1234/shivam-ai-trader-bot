@@ -22,10 +22,13 @@ Rules:
 6. Do not invent API endpoints or model names; verify in official docs.
 7. News links to sectors/stocks and the 🟢/🔴 tone come from keyword rules in `bot/news.py`, never from the LLM.
 8. Groups: only the owner can /allow a group; never answer ordinary group chat (see `main.wants_reply`).
-9. The bot's short-term memory (`bot/state.py`: drafts, lists, waits; `report._CACHE`; `server._seen`) lives in
-   one process. Cloud Run must stay at `--max-instances 1` (gunicorn 1 worker, threads only so a resent update
-   gets "duplicate" at once; `server._work_lock` handles one update at a time). Don't add per-instance state
-   and then scale out.
+9. Short-term memory (`bot/state.py`: drafts, lists, waits) is a file on PC/GitHub and, on Cloud Run
+   (`BOT_STORE=gs://`), part of the store document: `state.begin(update_id)` claims the update there (no
+   double handling, even across servers) and loads fresh memory, `state.flush()` writes only what changed;
+   both are called in `main.process_update`. News pages and `report._CACHE` stay per process. Keep Cloud Run
+   at `--max-instances 1` (gunicorn 1 worker + threads; `server._work_lock` = one update at a time).
 10. Paper ticket: steps edit the tapped message (`telegram.show(..., message_id)`); buttons are tagged with
     their step (`pt:w:<step>:<value>`, see `main._tag`) and late taps are ignored; `main._TAPS` drops double
     taps; typed text counts as ticket input only if `paper.looks_like_input`.
+11. Bump `bot/version.py` on every release; `/version`, the health page and `deploy_cloudrun.sh` use it to
+    prove which code is live.

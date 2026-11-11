@@ -1,4 +1,39 @@
-# SHIVAM AI TRADER — Upgrade guide (10 Nov 2026)
+# SHIVAM AI TRADER — Upgrade guide (12 Nov 2026)
+
+## Update of 12 Nov 2026 — lasting memory, no double answers, version check
+
+**First, check what is running.** Send `/version` to the bot.
+- "I don't know that command" → the server still runs a version older than 12 Nov. The update has not
+  reached Cloud Run (uploading to GitHub alone does not update it). Do part B below.
+- It shows **version 12 Nov 2026** and **Google Cloud Run** → you are up to date.
+
+**Updating Cloud Run this time** (Cloud Shell):
+```bash
+cd ~/shivam-ai-trader-bot && git pull && bash deploy_cloudrun.sh
+```
+If `git pull` prints an error, start clean (your settings stay in Cloud Run; press Enter at each question):
+```bash
+cd ~ && rm -rf shivam-ai-trader-bot && git clone https://github.com/<your-name>/shivam-ai-trader-bot.git
+cd shivam-ai-trader-bot && bash deploy_cloudrun.sh
+```
+The last lines must say `OK: version 12 Nov 2026 is live`. From now on `bash deploy_cloudrun.sh` gets the
+newest code by itself.
+
+What is new:
+1. **Memory that lasts a day.** The open paper ticket, numbered lists and menu questions are saved in Cloud
+   Storage next to the paper trades. They survive restarts and are the same for every server. An open
+   ticket waits a day until you confirm or cancel it; 💼 Paper trades shows **📝 Continue ticket**.
+2. **A copy of the same tap is refused everywhere.** Every Telegram update is marked as taken in Cloud
+   Storage before it is handled, so no second chart, even if two servers were running.
+3. **The server stays awake.** A free Cloud Scheduler job opens the bot's address every 5 minutes
+   (`KEEP_WARM=0` turns it off; `MIN_INSTANCES=1` is the paid guarantee).
+4. **`/version`** (also at the bottom of /start and /settings) and a deploy script that updates itself,
+   names the version it deploys and checks it is live.
+
+139 offline tests.
+
+---
+
 
 ## Update of 10 Nov 2026 — speed, double charts, "No paper ticket open"
 
@@ -24,7 +59,6 @@ chart a second time. Every new server also needed 10–20 seconds to start.
 7. Optional: `MIN_INSTANCES=1 bash deploy_cloudrun.sh` keeps the server awake (no wake-up wait). Google
    bills idle time for this.
 
-132 offline tests.
 
 ---
 

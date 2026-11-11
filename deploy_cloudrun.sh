@@ -6,12 +6,34 @@
 #     bash deploy_cloudrun.sh cleanup    # only delete old container images (stay inside the free 0.5 GB)
 set -euo pipefail
 
+# Always deploy the newest code: get it from GitHub first, then start this script again from the new
+# file. (The whole block is read before it runs, so replacing this file underneath is safe.)
+{
+  if [ -z "${SHIVAM_PULLED:-}" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Getting the latest code from GitHub..."
+    if git pull --ff-only; then
+      export SHIVAM_PULLED=1
+      exec bash "$0" "$@"
+    fi
+    echo
+    echo "WARNING: the code could NOT be updated from GitHub (see the message above)."
+    echo "         This will deploy the files that are in this folder now."
+    echo "         To start clean:  cd ~ && rm -rf shivam-ai-trader-bot && git clone <your repo URL>"
+    echo
+  fi
+}
+VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' bot/version.py 2>/dev/null || true)"
+echo "Code version in this folder: ${VERSION:-unknown (older than 12 Nov 2026)}"
+
 SERVICE="shivam-trader-bot"
 REGION="${REGION:-us-central1}"   # free-tier outbound data is counted from North America
 # Exactly ONE server: the bot keeps open paper tickets, numbered lists and analyses in that server's
 # memory, so a second server would answer "No paper ticket open" and send charts twice.
 # MIN_INSTANCES=1 keeps it awake all day (no 10-20 s wake-up after a quiet period) - Google bills for that.
 MIN_INSTANCES="${MIN_INSTANCES:-0}"
+# KEEP_WARM=1 (default): a free Cloud Scheduler job opens the bot's address every 5 minutes, which
+# normally stops Cloud Run from putting the idle server to sleep. KEEP_WARM=0 turns it off.
+KEEP_WARM="${KEEP_WARM:-1}"
 
 PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
 if [ -z "$PROJECT" ]; then
@@ -103,6 +125,7 @@ fi
 if [ "${1:-}" = "disconnect" ]; then
   TOKEN="$(ask_secret TELEGRAM_BOT_TOKEN)"
   curl -s "https://api.telegram.org/bot${TOKEN}/deleteWebhook" ; echo
+  gcloud scheduler jobs delete "${SERVICE}-keep-awake" --location "$REGION" --quiet >/dev/null 2>&1 || true
   echo "Disconnected. Re-enable the 'Bot commands' workflow on GitHub if you want GitHub to answer again."
   exit 0
 fi
@@ -197,7 +220,37 @@ gcloud run deploy "$SERVICE" \
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.url)')"
 echo "Service URL: $URL"
-curl -s "$URL/" ; echo
+LIVE="$(curl -s --max-time 60 "$URL/" || true)"
+echo "$LIVE"
+if [ -n "$VERSION" ] && printf '%s' "$LIVE" | grep -qF "Version ${VERSION} "; then
+  echo "OK: version ${VERSION} is live. Send /version to the bot to see the same."
+else
+  echo "WARNING: the live server does not report version ${VERSION:-?}. The deploy above may have failed;"
+  echo "         scroll up for the error, and check Cloud Run -> ${SERVICE} -> Revisions."
+fi
+
+keep_warm() {
+  local job="${SERVICE}-keep-awake"
+  if [ "$KEEP_WARM" != "1" ] || [ "$MIN_INSTANCES" != "0" ]; then
+    gcloud scheduler jobs delete "$job" --location "$REGION" --quiet >/dev/null 2>&1 || true
+    return 0
+  fi
+  echo "Keeping the server awake (free Cloud Scheduler job, opens the bot's address every 5 minutes)..."
+  if ! gcloud services enable cloudscheduler.googleapis.com --quiet; then
+    echo "  Skipped: Cloud Scheduler could not be turned on. The bot works; it just sleeps when idle."
+    return 0
+  fi
+  if gcloud scheduler jobs describe "$job" --location "$REGION" >/dev/null 2>&1; then
+    gcloud scheduler jobs update http "$job" --location "$REGION" --schedule "*/5 * * * *" \
+      --uri "${URL}/" --http-method GET --quiet >/dev/null \
+      || echo "  Skipped: the keep-awake job could not be updated."
+  else
+    gcloud scheduler jobs create http "$job" --location "$REGION" --schedule "*/5 * * * *" \
+      --uri "${URL}/" --http-method GET --quiet >/dev/null \
+      || echo "  Skipped: the keep-awake job could not be created. The bot works; it just sleeps when idle."
+  fi
+}
+keep_warm
 
 cleanup_images
 
@@ -213,8 +266,7 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   --data-urlencode 'allowed_updates=["message","callback_query"]' \
   --data-urlencode "max_connections=1" ; echo   # one message at a time, in the order they were sent
 echo
-echo "Done. Send /start to your bot: it should reply within seconds (the first reply after a quiet"
-echo "period can take 10-20 seconds while the server wakes up)."
+echo "Done. Send /version to your bot: it must say version ${VERSION:-?} and 'Google Cloud Run'."
 echo "Now open GitHub -> Actions -> 'Bot commands' -> '...' -> Disable workflow (alerts keep running)."
 echo "Paper trades are saved in ${BOT_STORE}."
 echo "Groups: add the bot to a group, then send /allow there (only you, the owner, can approve a group)."

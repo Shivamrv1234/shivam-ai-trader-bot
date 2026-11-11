@@ -1,8 +1,5 @@
 # SHIVAM AI TRADER — Telegram bot for crypto, NSE, F&O, forex & commodities
 
-# [Setup Guide](https://drive.google.com/file/d/1Vm5QXJlQhYDxtwfYpExVrzxweY7VCth2/view?usp=sharing)
-# [Bot Features](https://drive.google.com/file/d/1G28VsClUAHtCOEkW4L6QeaQbS-gp7qdO/view?usp=sharing)
-
 Telegram is where you see alerts, ask questions and paper-trade. The analysis runs on **GitHub Actions**
 (alerts), **Google Cloud Run** (instant replies) or **your own Windows PC** (`start_bot.bat`). The bot reads
 data only: it has **no code that can place orders** with any broker.
@@ -228,15 +225,26 @@ straight to your own small server, so replies arrive in seconds. Alerts keep run
 6. Send `/start` to your bot.
 
 **Update after code changes:** upload the new files to GitHub, then in Cloud Shell run
-`cd shivam-ai-trader-bot && git pull && bash deploy_cloudrun.sh` and press Enter to keep each value.
+`cd ~/shivam-ai-trader-bot && bash deploy_cloudrun.sh` and press Enter to keep each value. The script
+gets the newest code from GitHub by itself, says which version it deploys and checks that version is live.
+Uploading to GitHub alone does **not** update Cloud Run.
 **Stop instant replies:** `bash deploy_cloudrun.sh disconnect`, then re-enable the Bot commands workflow.
 
-**One server only.** The script deploys exactly one Cloud Run server (`--max-instances 1`). The bot keeps
-open paper tickets, numbered lists and recent analyses in that server's memory, so a second server would
-answer "No paper ticket open" and send charts twice. Don't raise that number in the Cloud console.
-**No wake-up wait (optional):** after a quiet period the server sleeps and the first reply takes 10–20
-seconds. `MIN_INSTANCES=1 bash deploy_cloudrun.sh` keeps it awake all day; Google bills idle time for
-that (see the Cloud Run pricing page).
+**Check which version is running:** send `/version` to the bot. It shows the version date, where the bot
+runs and how long the server has been awake. If the date is not the one in `bot/version.py`, the update
+did not reach the server: run `bash deploy_cloudrun.sh` again and read its last lines (it says
+"OK: version … is live" or prints a warning).
+
+**Memory that lasts.** On Cloud Run the bot's short-term memory (the open paper ticket, numbered lists,
+menu questions) is saved in the same Cloud Storage file as the paper trades. It survives restarts, and an
+open ticket waits **a day** until you confirm or cancel it (💼 Paper trades shows "📝 Continue ticket").
+Every Telegram update is also marked as taken there, so a copy of the same tap can never be answered
+twice — even if two servers were running.
+
+**Staying awake.** The script deploys one server (`--max-instances 1`) and, by default, a free Cloud
+Scheduler job that opens the bot's address every 5 minutes, which normally stops Cloud Run from putting
+the idle server to sleep (`KEEP_WARM=0 bash deploy_cloudrun.sh` turns it off). For a guarantee use
+`MIN_INSTANCES=1 bash deploy_cloudrun.sh`; Google bills idle time for that.
 
 **Cost:** normal personal use fits Cloud Run's free tier (2 million requests and 180,000 vCPU-seconds a
 month). Container images are stored in Artifact Registry, which is free up to 0.5 GB. The deploy script
