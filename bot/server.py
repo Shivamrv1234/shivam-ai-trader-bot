@@ -21,6 +21,10 @@ log = logging.getLogger("server")
 app = Flask(__name__)
 _seen: deque = deque(maxlen=500)      # Telegram may resend an update; handle each only once
 _seen_lock = threading.Lock()
+# The server takes several requests at once but works on one update at a time (charts are not
+# thread-safe, and the bot's memory lives in this one process). A resent update is therefore answered
+# "duplicate" immediately, instead of making Cloud Run start a second, empty server for it.
+_work_lock = threading.Lock()
 _commands_set = False
 
 
@@ -41,11 +45,12 @@ def telegram_webhook():
         if uid in _seen:
             return "duplicate", 200
         _seen.append(uid)
-    if not _commands_set:
-        telegram.set_commands()
-        _commands_set = True
-    try:
-        main.process_update(update)
-    except Exception:  # never return an error: Telegram would keep retrying the same update
-        log.exception("Update %s failed", uid)
+    with _work_lock:
+        if not _commands_set:
+            telegram.set_commands()
+            _commands_set = True
+        try:
+            main.process_update(update)
+        except Exception:  # never return an error: Telegram would keep retrying the same update
+            log.exception("Update %s failed", uid)
     return "ok", 200

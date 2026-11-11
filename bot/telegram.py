@@ -106,12 +106,21 @@ def _route(payload: dict, chat_id: str | None) -> None:
         c.reply_to = None   # quote once, not on every message
 
 
+_HTTP = requests.Session()     # one kept-open connection to Telegram: no new TLS handshake per message
+
+
 def _call(method: str, data: dict | None = None, files: dict | None = None) -> object:
     token = telegram_token()
     if not token:
         raise TelegramError("TELEGRAM_BOT_TOKEN is not set")
+    url = f"https://api.telegram.org/bot{token}/{method}"
     try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/{method}", data=data, files=files, timeout=60)
+        try:
+            r = _HTTP.post(url, data=data, files=files, timeout=60)
+        except requests.ConnectionError:
+            if files:          # a half-sent photo can't be replayed safely from the same file objects
+                raise
+            r = _HTTP.post(url, data=data, timeout=60)   # the kept-open connection had gone stale: once more
         body = r.json()
     except (requests.RequestException, ValueError) as exc:
         raise TelegramError(f"{method}: {exc.__class__.__name__}") from None
@@ -171,7 +180,9 @@ def send_text(text: str, chat_id: str | None = None, buttons=None) -> None:
 
 def edit_text(text: str, message_id: int, chat_id: str | None = None, buttons=None) -> None:
     """Replace a message in place (news pages flip like tabs). Falls back to a new message."""
-    text = split_text(text)[0]
+    c = ctx()
+    who = _who(c) if not chat_id or (c and str(chat_id) == c.chat_id) else ""
+    text = split_text(who + text)[0]
     payload = {"chat_id": _chat(chat_id), "message_id": message_id, "text": text,
                "parse_mode": "HTML", "disable_web_page_preview": "true"}
     kb = keyboard(buttons)

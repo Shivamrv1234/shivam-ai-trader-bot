@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import logging
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -610,26 +611,33 @@ def paper_ticket(market: str, sym: str, tf: str) -> None:
                                       [("💼 My paper trades", "pt:l"), HOME]])
 
 
-def paper_step() -> None:
-    """Show the current step of the ticket and wait for a typed number."""
+def _tag(rows: list, step: str) -> list:
+    """Ticket buttons carry their step, so a late or repeated tap can never land on the next step."""
+    return [[(lbl, f"pt:w:{step}:{cb[5:]}" if cb.startswith("pt:v:") else cb) for lbl, cb in row] for row in rows]
+
+
+def paper_step(mid: int | None = None, note: str = "") -> None:
+    """Show the current step of the ticket (in the tapped message when there is one) and wait for a typed number."""
     key = key_of(None)
     d = state.draft(key)
     if d is None:
         telegram.send_text("That paper ticket expired. Tap 📝 Paper trade again.", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
         return
     text, rows = paper.step_prompt(d)
+    if note:
+        text = f"⚠️ {html.escape(note)}\n\n{text}"
     state.set_wait(key, "pt" if d["step"] != "confirm" else None)
-    telegram.send_text(text, buttons=rows)
+    telegram.show(text, None, _tag(rows, d["step"]), mid)
 
 
-def paper_start(market: str, sym: str, tf: str, side: str, recommended: bool) -> None:
+def paper_start(market: str, sym: str, tf: str, side: str, recommended: bool, mid: int | None = None) -> None:
     a = report.get(market, sym, tf, with_flow=False)
     a.live_price = paper.live_price(market, a.symbol) or a.now_price
     state.set_draft(key_of(None), paper.new_draft(a, side, recommended))
-    paper_step()
+    paper_step(mid)
 
 
-def paper_input(raw: str) -> None:
+def paper_input(raw: str, mid: int | None = None, step: str | None = None) -> None:
     """A typed number or a tapped suggestion for the ticket."""
     key = key_of(None)
     d = state.draft(key)
@@ -637,16 +645,17 @@ def paper_input(raw: str) -> None:
         telegram.send_text("No paper ticket open. Tap 📝 Paper trade under any analysis.", buttons=[[HOME]])
         return
     if d.get("edit_id"):
-        paper_edit_input(d, raw)
+        paper_edit_input(d, raw, mid)
+        return
+    if step and d["step"] != step:
+        log.info("Ignored a late tap for step %s (ticket is at %s).", step, d["step"])
         return
     err = paper.apply_value(d, raw.strip())
     state.set_draft(key, d)
-    if err:
-        telegram.send_text(f"⚠️ {html.escape(err)}")
-    paper_step()
+    paper_step(mid, err or "")
 
 
-def paper_confirm() -> None:
+def paper_confirm(mid: int | None = None) -> None:
     key = key_of(None)
     d = state.draft(key)
     if d is None or d.get("step") != "confirm":
@@ -659,8 +668,8 @@ def paper_confirm() -> None:
     state.set_wait(key, None)
     icon = "🟢" if t["side"] == "BUY" else "🔴"
     what = "opened" if t["status"] == "open" else f"placed ({t['order']} order, waits for {t['entry']:,.6g})"
-    telegram.send_text(f"{icon} <b>Paper {t['side']} {what} · #{t['id']}</b>\n" + paper.trade_block(t, d["live"]),
-                       buttons=[[("💼 My paper trades", "pt:l")], [HOME]])
+    telegram.show(f"{icon} <b>Paper {t['side']} {what} · #{t['id']}</b>\n" + paper.trade_block(t, d["live"]),
+                  None, [[("💼 My paper trades", "pt:l")], [HOME]], mid)
 
 
 def paper_edit_start(trade_id: int) -> None:
@@ -674,7 +683,7 @@ def paper_edit_start(trade_id: int) -> None:
     paper_edit_prompt(d)
 
 
-def paper_edit_prompt(d: dict) -> None:
+def paper_edit_prompt(d: dict, mid: int | None = None, note: str = "") -> None:
     key = key_of(None)
     state.set_wait(key, "pt")
     cur = d["cur"]
@@ -687,12 +696,14 @@ def paper_edit_prompt(d: dict) -> None:
         text = f"✏️ <b>#{d['edit_id']}</b> stop-loss {f(d['sl'], cur)}. Send a new <b>take profit</b>, or tap:"
         rows = [[(f"Keep {f(d['tp'], cur)}", "pt:v:keep")]]
     rows.append([("✖ Cancel", "pt:q")])
-    telegram.send_text(text, buttons=rows)
+    if note:
+        text = f"⚠️ {html.escape(note)}\n\n{text}"
+    telegram.show(text, None, _tag(rows, "e" + d["step"]), mid)
 
 
-def paper_edit_input(d: dict, raw: str) -> None:
+def paper_edit_input(d: dict, raw: str, mid: int | None = None) -> None:
     key = key_of(None)
-    raw = raw.strip()
+    raw = paper.WORDS.get(raw.strip().lower(), raw.strip())
     if raw == "keep":
         v = d["sl"] if d["step"] == "sl" else d["tp"]
     elif raw == "be":
@@ -706,20 +717,19 @@ def paper_edit_input(d: dict, raw: str) -> None:
     elif d["step"] == "tp" and ((up and v <= d["entry"]) or (not up and v >= d["entry"])):
         err = f"The target must be {'above' if up else 'below'} the entry."
     if err:
-        telegram.send_text(f"⚠️ {err}")
-        paper_edit_prompt(d)
+        paper_edit_prompt(d, mid, err)
         return
     if d["step"] == "sl":
         d["sl"], d["step"] = v, "tp"
         state.set_draft(key, d)
-        paper_edit_prompt(d)
+        paper_edit_prompt(d, mid)
         return
     uid, _, chat = who()
     t = paper.modify(d["edit_id"], uid, chat, telegram_chat_id(), stop=d["sl"], target=v)
     state.set_draft(key, None)
     state.set_wait(key, None)
-    telegram.send_text(f"✏️ <b>#{t['id']} updated</b> · 🛑 {paper._fmt(t['stop'], t['currency'])} · "
-                       f"🎯 {paper._fmt(t['target'], t['currency'])}", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+    telegram.show(f"✏️ <b>#{t['id']} updated</b> · 🛑 {paper._fmt(t['stop'], t['currency'])} · "
+                  f"🎯 {paper._fmt(t['target'], t['currency'])}", None, [[("💼 My paper trades", "pt:l"), HOME]], mid)
 
 
 def paper_exit(trade_id: int) -> None:
@@ -754,19 +764,29 @@ def paper_callback(rest: str, message_id: int | None) -> None:
     elif sub == "e" and val.isdigit():
         paper_edit_start(int(val))
     elif sub == "v":
-        paper_input(val)
+        paper_input(val, message_id)
+    elif sub == "w":                       # a ticket button that knows which step it belongs to
+        step, _, val = val.partition(":")
+        d = state.draft(key_of(None))
+        editing = step in ("esl", "etp")       # ✏️ SL/TP of a trade that is already open
+        if d and (bool(d.get("edit_id")) != editing or (editing and step != "e" + d["step"])):
+            log.info("Ignored a late tap for step %s.", step)
+            return
+        paper_input(val, message_id, None if editing else step)
     elif sub == "g":                       # change one field from the confirm screen
         d = state.draft(key_of(None))
         if d:
             d["step"], d["edit_back"] = ("size" if val == "qty" else val), True
             state.set_draft(key_of(None), d)
-        paper_step()
+        paper_step(message_id if d else None)
     elif sub == "k":
-        paper_confirm()
+        paper_confirm(message_id)
     elif sub == "q":
+        had = state.draft(key_of(None)) is not None
         state.set_draft(key_of(None), None)
         state.set_wait(key_of(None), None)
-        telegram.send_text("✖ Paper ticket cancelled.", buttons=[[("💼 My paper trades", "pt:l"), HOME]])
+        telegram.show("✖ Paper ticket cancelled.", None, [[("💼 My paper trades", "pt:l"), HOME]],
+                      message_id if had else None)
     elif sub in ("o", "b", "s", "r", "c"):
         if sub in ("r", "c"):
             side_code, _, val = val.partition(":")
@@ -779,7 +799,8 @@ def paper_callback(rest: str, message_id: int | None) -> None:
         if sub == "o":
             paper_ticket(market, sym, tf)
         else:
-            paper_start(market, sym, tf, "BUY" if side_code == "b" else "SELL", recommended=sub != "c")
+            paper_start(market, sym, tf, "BUY" if side_code == "b" else "SELL", recommended=sub != "c",
+                        mid=message_id if sub in ("r", "c") else None)
 
 
 def cmd_paper(args: list[str]) -> None:
@@ -1031,7 +1052,7 @@ def handle(text: str, chat_id: str | None = None) -> None:
             deliver(report.analyze_any(rest[0], tf))
         else:
             telegram.send_text("Which one? Example: <code>/analyze ETH 15m</code> or just send <code>ETH</code>.")
-    elif not cmd.startswith("/") and state.wait_mode(key) == "pt":
+    elif not cmd.startswith("/") and state.wait_mode(key) == "pt" and paper.looks_like_input(raw):
         state.take_wait(key)
         paper_input(raw)                       # a number typed into the paper-trade ticket
     elif len(parts) == 1 and cmd.isdigit():
@@ -1042,8 +1063,9 @@ def handle(text: str, chat_id: str | None = None) -> None:
         mode = state.take_wait(key)
         rest, tf = split_tf(parts)
         if mode == "pt":
-            paper_input(raw)
-        elif mode:
+            state.set_wait(key, "pt")          # not a ticket value: a normal message; the ticket keeps waiting
+            mode = None
+        if mode:
             open_stock(" ".join(rest) or raw, mode, tf)
         elif len(rest) == 1 and _looks_like_symbol(rest[0]):
             quick_symbol(rest[0], tf)
@@ -1228,10 +1250,17 @@ def wants_reply(msg: dict, text: str, key: str) -> tuple[bool, str]:
     if reply.get("is_bot") and (not me or str(reply.get("username", "")).lower() == me):
         return True, t
     if state.pending_wait(key):
+        if state.wait_mode(key) == "pt" and not paper.looks_like_input(t):
+            return False, t           # ordinary group chat while a paper ticket is open: not for the bot
         return True, t
     if t.isdigit() and state.recent_list(key):
         return True, t
     return False, t
+
+
+_TAPS: dict = {}                 # (chat, user, message, button) -> when it was last handled
+DOUBLE_TAP_SECONDS = 3
+QUICK_KINDS = ("pt", "n", "m")
 
 
 def process_update(u: dict) -> None:
@@ -1244,17 +1273,28 @@ def process_update(u: dict) -> None:
             telegram.answer_callback(cb["id"], "This bot is private.")
             log.warning("Ignored a button tap from chat %s user %s.", cid, uid)
             return
-        telegram.answer_callback(cb["id"], "Working on it…")
-        log.info("Button: %s", cb.get("data", "")[:60])
-        if cb.get("data") == "n:x":   # page indicator / section title: nothing to do
+        data_str = cb.get("data", "")
+        tap = (cid, uid, msg.get("message_id"), data_str)
+        if time.time() - _TAPS.get(tap, 0) < DOUBLE_TAP_SECONDS:
+            telegram.answer_callback(cb["id"], "Already done ✔")
+            log.info("Ignored a double tap: %s", data_str[:60])
+            return
+        quick = data_str.split(":")[0] in QUICK_KINDS          # screens that need no market data
+        telegram.answer_callback(cb["id"], "" if quick else "Working on it…")
+        log.info("Button: %s", data_str[:60])
+        if data_str == "n:x":   # page indicator / section title: nothing to do
             return
         thread = msg.get("message_thread_id") if msg.get("is_topic_message") else None
         token = telegram.set_ctx(telegram.Ctx(cid, uid, name, is_group, None, thread))
         try:
-            telegram.chat_action(cid)
-            _safely(cb.get("data", ""), handle_callback, cb.get("data", ""), cid, msg.get("message_id"))
+            if not quick:
+                telegram.chat_action(cid)
+            _safely(data_str, handle_callback, data_str, cid, msg.get("message_id"))
         finally:
             telegram.reset_ctx(token)
+            if len(_TAPS) > 300:
+                _TAPS.clear()
+            _TAPS[tap] = time.time()      # the same button tapped again while this ran arrives right after
         return
     msg = u.get("message") or {}
     text = msg.get("text") or ""
@@ -1365,6 +1405,13 @@ def check_paper_all() -> None:
             telegram.send_text(text, chat, buttons=[[("💼 Paper trades", "pt:l")]])
 
 
+def _confirm_quietly(last_update_id: int) -> None:
+    try:
+        telegram.confirm_updates(last_update_id)
+    except telegram.TelegramError as exc:
+        log.info("Confirm skipped: %s", exc)
+
+
 def run_local(with_alerts: bool = True, max_loops: int | None = None) -> None:
     """Own PC or a cloud VM: answer messages instantly (long polling) and, optionally, send the
     scheduled alerts. Stop with Ctrl+C. Don't also run Cloud Run or GitHub's alerts, or you get doubles."""
@@ -1386,11 +1433,16 @@ def run_local(with_alerts: bool = True, max_loops: int | None = None) -> None:
         try:
             updates = telegram.poll_updates(offset)
         except telegram.TelegramError as exc:
-            log.warning("Telegram: %s (retrying in 5 s)", exc)
-            time.sleep(5)
+            clash = "conflict" in str(exc).lower()      # another getUpdates (e.g. GitHub's "Bot commands" check)
+            log.warning("Telegram: %s (retrying in %s s)", exc, 1 if clash else 5)
+            time.sleep(1 if clash else 5)
             continue
+        if updates:
+            offset = updates[-1]["update_id"] + 1
+            # Tell Telegram right away that these are taken, so nothing else (GitHub's "Bot commands"
+            # workflow) can pick the same messages up while this PC is still working on them.
+            threading.Thread(target=_confirm_quietly, args=(updates[-1]["update_id"],), daemon=True).start()
         for u in updates:
-            offset = u["update_id"] + 1
             process_update(u)
         if with_alerts:
             for market in due_alerts(datetime.now(timezone.utc), fired):

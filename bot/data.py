@@ -50,11 +50,14 @@ def norm_tf(tf: str | None, default: str = "1d") -> str:
     return t if t in TF_SECONDS else default
 
 
+_HTTP = requests.Session()     # kept-open connections to the data servers (saves a TLS handshake per request)
+
+
 def _get(url: str, params: dict | None = None, tries: int = 3, headers: dict | None = None) -> object:
     last = None
     for attempt in range(tries):
         try:
-            r = requests.get(url, params=params, timeout=20, headers=headers)
+            r = _HTTP.get(url, params=params, timeout=20, headers=headers)
             if r.status_code == 200:
                 return r.json()
             last = f"HTTP {r.status_code}"

@@ -64,20 +64,35 @@ def live_price(market: str, symbol: str) -> float | None:
     return p
 
 
+_CANDLES: dict = {}             # (market, symbol) -> (when fetched, 5-minute candles, how many were asked for)
+CANDLE_CACHE_SECONDS = 60
+
+
 def candles_since(t: dict) -> pd.DataFrame | None:
-    """5-minute candles after the order was placed (to see if it filled, or hit its stop/target)."""
-    try:
-        if t["market"] == "crypto":
-            df = data.crypto_candles(t["symbol"], "5m", limit=1000)
-        elif t["market"] == "fx":
-            from bot import fx
-            df = fx.candles(t["symbol"], "5m")
-        else:
-            df = data.stock_candles(t["symbol"], "5m")
-    except Exception as exc:
-        log.info("Paper candles %s: %s", t["symbol"], exc)
-        return None
+    """5-minute candles after the order was placed (to see if it filled, or hit its stop/target).
+    Only as many candles as the trade's age needs are fetched, and they are reused for a minute."""
     since = pd.Timestamp(t.get("created", t.get("opened", 0)), unit="s", tz="UTC")
+    need = min(1000, max(12, int((time.time() - since.timestamp()) / 300) + 3))
+    key = (t["market"], t["symbol"])
+    hit = _CANDLES.get(key)
+    if hit and time.time() - hit[0] < CANDLE_CACHE_SECONDS and hit[2] >= need:
+        df = hit[1]
+    else:
+        try:
+            if t["market"] == "crypto":
+                df = data.crypto_candles(t["symbol"], "5m", limit=need)
+            elif t["market"] == "fx":
+                from bot import fx
+                df = fx.candles(t["symbol"], "5m")
+            else:
+                df = data.stock_candles(t["symbol"], "5m")
+        except Exception as exc:
+            log.info("Paper candles %s: %s", t["symbol"], exc)
+            return None
+        _CANDLES[key] = (time.time(), df, need)
+        live = df.attrs.get("live_price")
+        if live:                                   # the same request brought the live price: no second call
+            _PRICE[key] = (time.time(), float(live))
     return df[df.index >= since.floor("5min") + pd.Timedelta(minutes=5)]
 
 
@@ -325,12 +340,21 @@ def check_stops(chat_id: str, user_id: str | None = None) -> list[dict]:
                                              index=[pd.Timestamp.now(tz="UTC")]))
         if ch:
             updates.append((t["id"], ch))
-    events = []
-    for tid, ch in updates:
-        out = _apply(tid, ch)
-        if out:
-            events.append(out)
-    return events
+    if not updates:
+        return []
+    changes = dict(updates)
+
+    def fn(doc):                                   # all fills and closes in one write
+        out = []
+        for t in _trades(doc):
+            ch = changes.get(t["id"])
+            if ch and t["status"] in ("open", "pending"):
+                t.update(ch)
+                if "entry" in ch and t.get("lev"):
+                    t["liq"] = liquidation(t["side"], t["entry"], t["lev"], t["market"])
+                out.append(dict(_finish(t)))
+        return out
+    return store.update(fn)
 
 
 def _mine(chat_id: str, user_id: str | None, states: tuple) -> list[dict]:
@@ -524,6 +548,16 @@ def parse_number(text: str) -> float | None:
         return None
 
 
+WORDS = {"market": "mkt", "mkt": "mkt", "bot": "rec", "rec": "rec", "keep": "keep", "be": "be", "breakeven": "be"}
+
+
+def looks_like_input(text: str) -> bool:
+    """Is this typed message a value for the ticket (a number, a money amount, 'market', 'bot')?
+    Anything else is ordinary chat and must not be read as a ticket value."""
+    t = text.strip().lower()
+    return bool(t) and len(t) <= 24 and (t in WORDS or parse_number(t) is not None)
+
+
 def is_money(text: str) -> bool:
     t = text.strip().lower()
     return any(w in t for w in MONEY_WORDS)
@@ -674,6 +708,7 @@ def _money_to_price(d: dict, amount: float, field: str) -> float | None:
 def apply_value(d: dict, raw: str) -> str | None:
     """Use a typed value or a tapped suggestion for the current step. Returns an error text or None."""
     st, raw = d["step"], raw.strip()
+    raw = WORDS.get(raw.lower(), raw)
     money_in = is_money(raw) or (raw[:1] in ("C", "M") and parse_number(raw[1:]) is not None)
     if st == "entry":
         if raw == "mkt":
