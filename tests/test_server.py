@@ -117,3 +117,9 @@ def test_resent_update_is_answered_at_once_while_the_first_is_still_running(clie
     nxt.join(5)
     assert results == {"first": b"ok", "copy": b"duplicate", "next": b"ok"}
     assert order == [("start", 70), ("end", 70), ("start", 71), ("end", 71)]
+
+
+def test_health_page_shows_the_version(client):
+    from bot.version import VERSION
+
+    assert f"Version {VERSION} ".encode() in client.get("/").data

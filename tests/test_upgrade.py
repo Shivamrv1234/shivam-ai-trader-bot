@@ -882,3 +882,132 @@ def test_telegram_keeps_one_connection_and_retries_a_stale_one(monkeypatch):
     with pytest.raises(telegram.TelegramError):                    # a photo upload is not replayed
         telegram._call("sendPhoto", {"chat_id": "1"}, files={"photo": ("c.png", b"x", "image/png")})
     assert calls == ["sendPhoto"]
+
+
+# ---------------------------------------------------------------- lasting memory (Cloud Run: Cloud Storage)
+
+@pytest.fixture
+def cloud(monkeypatch):
+    """A fake Cloud Storage object with generation numbers; `cloud.new_server()` wipes this process's memory
+    the way a restart or a second server would."""
+    class Cloud:
+        doc, gen, puts, gets, down = {}, 1, 0, 0, False
+
+        def new_server(self):
+            store.forget()
+            state.forget()
+            report._CACHE.clear()
+            main._TAPS.clear()
+
+    c = Cloud()
+
+    def get():
+        if c.down:
+            raise store.StoreError("Cloud Storage read failed: ConnectionError")
+        c.gets += 1
+        return json.loads(json.dumps(c.doc)), c.gen
+
+    def put(doc, generation):
+        if c.down:
+            raise store.StoreError("Cloud Storage write failed: ConnectionError")
+        if generation != c.gen:
+            return None
+        c.doc, c.gen, c.puts = json.loads(json.dumps(doc)), c.gen + 1, c.puts + 1
+        return c.gen
+
+    monkeypatch.setenv("BOT_STORE", "gs://bucket/store.json")
+    monkeypatch.setattr(store, "_gcs_get", get)
+    monkeypatch.setattr(store, "_gcs_put", put)
+    c.new_server()
+    yield c
+    c.new_server()
+
+
+def test_ticket_survives_a_restart_and_another_server(monkeypatch, ui, cloud):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    monkeypatch.setattr(paper, "candles_since", lambda t: None)
+    main.process_update(_tap(1, "a:c:SOLUSDT:4h"))
+    main.process_update(_tap(2, "pt:c:b:c:SOLUSDT:4h"))
+    assert "Step 1/5" in ui[-1][1] and cloud.doc["state"]["drafts"]["555"]["step"] == "entry"
+    cloud.new_server()                                         # restart: nothing left in this process
+    main.process_update(_tap(3, "pt:w:entry:mkt"))
+    assert "Step 2/5" in ui[-1][1] and "No paper ticket" not in ui[-1][1]
+    cloud.new_server()
+    main.process_update({"update_id": 4, "message": {"chat": {"id": 555}, "from": {"id": 555}, "text": "$200"}})
+    assert "Step 3/5 · Leverage" in ui[-1][1] and "capital $200" in ui[-1][1]
+    puts = cloud.puts
+    main.process_update(_tap(5, "pt:w:lev:L10"))               # one tap = claim + one save, however much changed
+    assert cloud.puts - puts == 2 and cloud.doc["state"]["drafts"]["555"]["qty"] == 20
+    # the ticket waits a day, not half an hour
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 20 * 3600)
+    assert state.draft("555")["step"] == "sl" and state.wait_mode("555") == "pt"
+    monkeypatch.setattr(time, "time", lambda: real() + 25 * 3600)
+    assert state.draft("555") is None
+
+
+def test_a_copy_of_the_same_update_is_refused_even_by_another_server(monkeypatch, ui, cloud):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    main.process_update(_tap(77, "a:c:BTCUSDT:30m"))
+    assert [m[0] for m in ui].count("photo") == 1
+    cloud.new_server()                                         # Telegram resends update 77 to a different server
+    main.process_update(_tap(77, "a:c:BTCUSDT:30m"))
+    main.process_update(_tap(77, "a:c:BTCUSDT:30m"))
+    assert [m[0] for m in ui].count("photo") == 1 and 77 in cloud.doc["seen"]
+    main.process_update(_tap(78, "a:c:BTCUSDT:1h"))            # a different tap still works
+    assert [m[0] for m in ui].count("photo") == 2
+
+
+def test_two_servers_do_not_overwrite_each_others_memory(monkeypatch, ui, cloud):
+    state.begin(1)
+    state.set_wait("111", "stock")                             # server A, mid-update
+    other = json.loads(json.dumps(cloud.doc))                  # meanwhile server B saves something for user 222
+    other.setdefault("state", {}).setdefault("wait", {})["222"] = {"mode": "fund", "ts": int(time.time())}
+    cloud.doc, cloud.gen = other, cloud.gen + 1
+    state.flush()
+    assert set(cloud.doc["state"]["wait"]) == {"111", "222"}   # both kept
+    state.begin(2)
+    state.set_wait("111", None)
+    state.flush()
+    assert set(cloud.doc["state"]["wait"]) == {"222"}          # and a removal removes only its own entry
+
+
+def test_news_pages_stay_out_of_the_shared_document(monkeypatch, ui, cloud):
+    state.begin(1)
+    state.remember_news("555", "all", [{"title": "x" * 500}] * 50, 1)
+    state.remember_list("555", "crypto", ["BTCUSDT"], "4h")
+    state.flush()
+    assert "news" not in cloud.doc["state"] and cloud.doc["state"]["lists"]["555"]["symbols"] == ["BTCUSDT"]
+    state.begin(2)                                             # the next update on this server still has the page
+    assert len(state.news("555")["items"]) == 50 and state.last_kind("555") == "scan"
+
+
+def test_bot_keeps_answering_when_storage_is_down(monkeypatch, ui, cloud):
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    cloud.down = True
+    main.process_update(_tap(5, "a:c:BTCUSDT:30m"))
+    assert [m[0] for m in ui].count("photo") == 1
+
+
+def test_version_command_and_open_ticket_on_the_paper_screen(monkeypatch, ui):
+    from bot.version import VERSION
+
+    monkeypatch.setattr(data, "crypto_candles", lambda sym, timeframe=None, limit=None: candles())
+    monkeypatch.setattr(paper, "live_price", lambda m, s: 100.0)
+    monkeypatch.setattr(paper, "candles_since", lambda t: None)
+    main.handle("/version", "555")
+    assert f"version <b>{VERSION}</b>" in ui[-1][1] and "this PC / VM" in ui[-1][1]
+    monkeypatch.setenv("K_SERVICE", "shivam-trader-bot")
+    monkeypatch.setenv("K_REVISION", "shivam-trader-bot-00042-abc")
+    main.handle("/version", "555")
+    assert "Google Cloud Run (shivam-trader-bot-00042-abc)" in ui[-1][1]
+    main.handle("/start", "555")
+    assert f"Version {VERSION}" in ui[-1][1]
+    main.handle_callback("a:c:SOLUSDT:4h", "555")
+    main.handle_callback("pt:c:b:c:SOLUSDT:4h", "555")
+    main.handle_callback("pt:w:entry:mkt", "555")
+    main.handle("/paper", "555")                               # leaves the ticket; it is still there
+    assert "Open ticket:</b> BUY SOL/USDT" in ui[-1][1] and ("📝 Continue ticket", "pt:resume") in flat(ui[-1][2])
+    main.handle_callback("pt:resume", "555")
+    assert "Step 2/5 · Capital or quantity" in ui[-1][1]
